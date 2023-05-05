@@ -326,16 +326,13 @@ impl Future for Server {
                 let (ref mut conn, ref mut raw_conn, _) =
                     this.connections.get_mut(&init_token).unwrap();
 
-                match Pin::new(conn).poll(cx) {
-                    std::task::Poll::Ready(result) => {
-                        if let Err(e) = result {
-                            debug!("error serving connection: {}", e)
-                        }
-
-                        this.mio_poll.registry().deregister(raw_conn)?;
-                        this.connections.remove(&init_token);
+                if let std::task::Poll::Ready(result) = Pin::new(conn).poll(cx) {
+                    if let Err(e) = result {
+                        debug!("error serving connection: {}", e)
                     }
-                    _ => {}
+
+                    this.mio_poll.registry().deregister(raw_conn)?;
+                    this.connections.remove(&init_token);
                 }
             }
         }
