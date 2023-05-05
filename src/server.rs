@@ -36,20 +36,22 @@ pub struct ServerConfig {
     pub service_builder: Builder,
 }
 
+type ConnectionMap = HashMap<
+    mio::Token,
+    (
+        Connection<ServerTcpStream, WSGICaller>,
+        TcpStream,
+        Option<Event>,
+    ),
+>;
+
 struct ServerRef {
     service_builder: Builder,
     server: TcpListener,
     identity_token: usize,
     events: Events,
     mio_poll: Poll,
-    connections: HashMap<
-        mio::Token,
-        (
-            Connection<ServerTcpStream, WSGICaller>,
-            TcpStream,
-            Option<Event>,
-        ),
-    >,
+    connections: ConnectionMap,
 }
 
 impl ServerRef {
@@ -326,9 +328,8 @@ impl Future for Server {
 
                 match Pin::new(conn).poll(cx) {
                     std::task::Poll::Ready(result) => {
-                        match result {
-                            Err(e) => debug!("error serving connection: {}", e),
-                            _ => {}
+                        if let Err(e) = result {
+                            debug!("error serving connection: {}", e)
                         }
 
                         this.mio_poll.registry().deregister(raw_conn)?;
