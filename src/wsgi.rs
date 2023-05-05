@@ -66,7 +66,7 @@ impl Future for WSGIFuture {
         let this = self.get_mut();
 
         match Python::with_gil(|py| -> PyResult<Poll<Result<(), hyper::Error>>> {
-            if let None = this.wsgi_request_body {
+            if this.wsgi_request_body.is_none() {
                 this.wsgi_request_body
                     .replace(Py::new(py, WSGIRequestBody::new(&this.request))?);
             }
@@ -99,7 +99,7 @@ impl Future for WSGIFuture {
                 let wsgi_response_builder = Py::new(py, WSGIResponseBuilder::default())?;
                 let environ = PyDict::new(py);
 
-                eviron_builder.build(&environ, this.wsgi_request_body.as_ref().unwrap().clone())?;
+                eviron_builder.build(environ, this.wsgi_request_body.as_ref().unwrap().clone())?;
 
                 let wsgi_return = this
                     .rustgi
@@ -315,7 +315,7 @@ impl<'a> WSGIEvironBuilder<'a> {
         };
         for (name, value) in self.request.headers() {
             environ.set_item(
-                &format!("HTTP_{}", name.as_str().to_uppercase().replace("-", "_")),
+                &format!("HTTP_{}", name.as_str().to_uppercase().replace('-', "_")),
                 value.as_bytes(),
             )?;
         }
@@ -357,7 +357,7 @@ impl WSGIResponseBuilder {
         headers: Vec<(String, String)>,
         exc_info: Option<&PyTuple>,
     ) {
-        self.status = StatusCode::from_str(status.split_once(" ").unwrap().0).unwrap();
+        self.status = StatusCode::from_str(status.split_once(' ').unwrap().0).unwrap();
         self.headers = headers;
         // TODO: exc_info
         let _ = exc_info;
