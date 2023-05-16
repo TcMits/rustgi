@@ -40,11 +40,6 @@ impl WSGICaller {
     pub(crate) fn new(rustgi: crate::core::Rustgi) -> Self {
         Self { rustgi }
     }
-
-    /// Create a new `WSGIFuture` from the given `Request`.
-    pub fn get_future(&self, request: Request<Incoming>) -> WSGIFuture {
-        WSGIFuture::new(self.rustgi.clone(), request)
-    }
 }
 
 impl Service<Request<Incoming>> for WSGICaller {
@@ -54,7 +49,7 @@ impl Service<Request<Incoming>> for WSGICaller {
 
     /// Call the WSGI application.
     fn call(&mut self, req: Request<Incoming>) -> Self::Future {
-        self.get_future(req)
+        WSGIFuture::new(self.rustgi.clone(), req)
     }
 }
 
