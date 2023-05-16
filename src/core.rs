@@ -1,18 +1,17 @@
-use std::io;
-
 use pyo3::PyObject;
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub struct RustgiBuilder {
-    wsgi_app: PyObject,
+    app: PyObject,
     host: String,
     port: Option<u16>,
 }
 
 impl RustgiBuilder {
-    pub fn new(wsgi_app: PyObject) -> Self {
+    pub fn new(app: PyObject) -> Self {
         Self {
-            wsgi_app,
+            app,
             host: "".to_string(),
             port: None,
         }
@@ -30,55 +29,44 @@ impl RustgiBuilder {
 
     pub fn build(self) -> Rustgi {
         Rustgi {
-            wsgi_app: self.wsgi_app,
-            host: self.host,
-            port: self.port,
+            inner: Arc::new(RustgiRef {
+                app: self.app,
+                host: self.host,
+                port: self.port,
+            }),
         }
     }
 }
 
-pub struct Rustgi {
-    wsgi_app: PyObject,
+struct RustgiRef {
+    app: PyObject,
     host: String,
     port: Option<u16>,
 }
 
+#[derive(Clone)]
+pub struct Rustgi {
+    inner: Arc<RustgiRef>,
+}
+
 impl Rustgi {
-    pub fn new(wsgi_app: PyObject) -> Self {
-        RustgiBuilder::new(wsgi_app).build()
+    pub fn new(app: PyObject) -> Self {
+        RustgiBuilder::new(app).build()
     }
 
     pub fn get_wsgi_app(&self) -> PyObject {
-        self.wsgi_app.clone()
+        self.inner.app.clone()
     }
 
     pub fn get_host(&self) -> &str {
-        &self.host
+        &self.inner.host
     }
 
     pub fn get_port(&self) -> Option<u16> {
-        self.port
+        self.inner.port
     }
 
-    pub fn wsgi_caller(&mut self) -> crate::wsgi::WSGICaller {
+    pub fn wsgi_caller(&self) -> crate::wsgi::WSGICaller {
         crate::wsgi::WSGICaller::new(self.clone())
-    }
-
-    pub async fn serve(&mut self, config: crate::server::ServerConfig) -> io::Result<()> {
-        crate::server::Server::new(self.clone(), config)?.await
-    }
-
-    pub fn clone(&mut self) -> Self {
-        Self {
-            wsgi_app: self.wsgi_app.clone(),
-            host: unsafe {
-                String::from_raw_parts(
-                    self.host.as_mut_ptr(),
-                    self.host.len(),
-                    self.host.capacity(),
-                )
-            },
-            port: self.port,
-        }
     }
 }

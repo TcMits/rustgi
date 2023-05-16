@@ -6,15 +6,28 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
 name = "rustgi"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-bytes = "1.4.0"
-futures = "0.3.28"
+futures = { version = "0.3.28", optional = true }
 http = "0.2.9"
-http-body-util = "0.1.0-rc.2"
 hyper = { version = "1.0.0-rc.3", features = ["server", "http1"] }
-mio = { version = "0.8.6", features = ["net", "os-poll"] }
-pyo3 = "0.18.1"
-tokio = "1.28.0"
-tracing = "0.1.37"
+lazy_static = "1.4.0"
+libc = { version ="0.2.144", optional = true }
+log = "0.4.17"
+pyo3 = "0.18.3"
+pyo3-log = { version = "0.8.1", optional = true }
+tokio = { version = "1.28.0", features = ["net", "signal", "rt"] , optional = true }
+
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = { version = "0.5", optional = true }
+
+[dev-dependencies]
+rustgi = { path = ".", features = ["python"] }
+
+[features]
+python = ["dep:tokio", "dep:tikv-jemallocator", "dep:libc", "pyo3/extension-module", "dep:pyo3-log", "dep:futures"]
+
+[profile.release]
+lto = true
+opt-level = 3

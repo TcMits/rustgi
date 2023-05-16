@@ -1,17 +1,21 @@
-use bytes::BytesMut;
+use crate::{error::Error, types::PyBytesBuf};
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE};
-use http_body_util::Full;
 use hyper::{
-    body::{Body, Bytes, Incoming, SizeHint},
+    body::{Body, Buf, Incoming, SizeHint},
     service::Service,
     Request, StatusCode,
 };
+use lazy_static::lazy_static;
+use log::debug;
 use pyo3::{
-    ffi::{PyDict_SetItemString, PySys_GetObject},
+    exceptions::PyValueError,
+    ffi::{PyBytes_Check, PyDict_SetItemString, PySys_GetObject},
+    intern,
     prelude::*,
-    types::{PyBytes, PyDict, PyList, PyTuple},
+    types::{PyDict, PyIterator, PyTuple},
     AsPyPointer,
 };
+use std::task::ready;
 use std::{
     convert::Infallible,
     future::Future,
@@ -19,9 +23,14 @@ use std::{
     str::FromStr,
     task::{Context, Poll},
 };
-use tracing::debug;
 
-const LINE_SPLIT: u8 = u8::from_be_bytes(*b"\n");
+lazy_static! {
+    static ref PY_BYTES_IO: PyObject = Python::with_gil(|py| PyModule::import(py, "io")
+        .unwrap()
+        .getattr("BytesIO")
+        .unwrap()
+        .into());
+}
 
 pub struct WSGICaller {
     rustgi: crate::core::Rustgi,
@@ -31,6 +40,11 @@ impl WSGICaller {
     pub(crate) fn new(rustgi: crate::core::Rustgi) -> Self {
         Self { rustgi }
     }
+
+    /// Create a new `WSGIFuture` from the given `Request`.
+    pub fn get_future(&self, request: Request<Incoming>) -> WSGIFuture {
+        WSGIFuture::new(self.rustgi.clone(), request)
+    }
 }
 
 impl Service<Request<Incoming>> for WSGICaller {
@@ -38,19 +52,21 @@ impl Service<Request<Incoming>> for WSGICaller {
     type Error = Infallible;
     type Future = WSGIFuture;
 
+    /// Call the WSGI application.
     fn call(&mut self, req: Request<Incoming>) -> Self::Future {
-        WSGIFuture::new(self.rustgi.clone(), req)
+        self.get_future(req)
     }
 }
 
 pub struct WSGIFuture {
     rustgi: crate::core::Rustgi,
     request: Request<Incoming>,
-    wsgi_request_body: Option<Py<WSGIRequestBody>>,
+    wsgi_request_body: Option<WSGIRequestBody>,
 }
 
 impl WSGIFuture {
-    pub fn new(rustgi: crate::core::Rustgi, request: Request<Incoming>) -> Self {
+    /// Create a new `WSGIFuture` from the given `Rustgi` and `Request`.
+    pub(crate) fn new(rustgi: crate::core::Rustgi, request: Request<Incoming>) -> Self {
         Self {
             rustgi,
             request,
@@ -62,280 +78,221 @@ impl WSGIFuture {
 impl Future for WSGIFuture {
     type Output = Result<hyper::Response<WSGIResponseBody>, Infallible>;
 
+    /// Poll the WSGI application.
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
 
-        match Python::with_gil(|py| -> PyResult<Poll<Result<(), hyper::Error>>> {
-            if this.wsgi_request_body.is_none() {
-                this.wsgi_request_body
-                    .replace(Py::new(py, WSGIRequestBody::new(&this.request))?);
-            }
+        match ready!(Python::with_gil(
+            |py| -> Poll<Result<hyper::Response<WSGIResponseBody>, Error>> {
+                let pool = unsafe { py.new_pool() };
+                let body = {
+                    let py = pool.python();
 
-            let mut body = this
-                .wsgi_request_body
-                .as_mut()
-                .unwrap()
-                .as_ref(py)
-                .borrow_mut();
+                    if this.wsgi_request_body.is_none() {
+                        this.wsgi_request_body.replace(WSGIRequestBody::new(py)?);
+                    }
 
-            Ok(body.poll_from_request(cx, &mut this.request))
-        }) {
-            Ok(Poll::Ready(Ok(()))) => {}
-            Ok(Poll::Pending) => return Poll::Pending,
-            Ok(Poll::Ready(Err(err))) => {
-                debug!("hyper error: {}", err);
-                return Poll::Ready(Ok(response_500()));
-            }
-            Err(err) => {
-                debug!("python error: {}", err);
-                return Poll::Ready(Ok(response_500()));
-            }
-        };
+                    let mut body = this.wsgi_request_body.take().unwrap();
 
-        let eviron_builder = WSGIEvironBuilder::new(&this.rustgi, &this.request);
+                    match body.poll_from_request(cx, py, &mut this.request) {
+                        Poll::Ready(Ok(())) => (),
+                        Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                        Poll::Pending => {
+                            this.wsgi_request_body.replace(body);
+                            return Poll::Pending;
+                        }
+                    };
 
-        match Python::with_gil(
-            |py| -> PyResult<http::Result<hyper::Response<WSGIResponseBody>>> {
+                    body
+                };
+
                 let wsgi_response_builder = Py::new(py, WSGIResponseBuilder::default())?;
-                let environ = PyDict::new(py);
+                let wsgi_iter = {
+                    let py = pool.python();
 
-                eviron_builder.build(environ, this.wsgi_request_body.as_ref().unwrap().clone())?;
+                    let environ = PyDict::new(py);
+                    WSGIEvironBuilder::new(&this.rustgi, &this.request)
+                        .build(environ, body.into_input(py)?)?;
 
-                let wsgi_return = this
-                    .rustgi
-                    .get_wsgi_app()
-                    .call1(py, (environ, wsgi_response_builder.clone()))?;
+                    this.rustgi
+                        .get_wsgi_app()
+                        .call1(py, (environ, wsgi_response_builder.clone()))?
+                };
 
-                let builder = wsgi_response_builder.as_ref(py).borrow_mut();
-                Ok(builder.build(wsgi_return))
+                let mut builder = wsgi_response_builder.as_ref(py).borrow_mut();
+                Poll::Ready(builder.build(py, wsgi_iter))
             },
-        ) {
-            Ok(Ok(response)) => Poll::Ready(Ok(response)),
-            Ok(Err(err)) => {
-                debug!("hyper error: {}", err);
-                Poll::Ready(Ok(response_500()))
+        )) {
+            Ok(mut response) => {
+                // ensure that current chunk is not empty
+                if let Err(err) = response.body_mut().poll_from_iter() {
+                    debug!("WSGI error: {}", err);
+                    return Poll::Ready(Ok(response_500()));
+                }
+
+                Poll::Ready(Ok(response))
             }
             Err(err) => {
-                debug!("python error: {}", err);
+                debug!("WSGI error: {}", err);
                 Poll::Ready(Ok(response_500()))
             }
         }
     }
 }
 
-#[pyclass]
 pub struct WSGIRequestBody {
-    inner: BytesMut,
-    // save the frame size to estimate allocations in readlines.
-    frame_size: usize,
+    inner: PyObject,
 }
 
 impl WSGIRequestBody {
-    pub fn new(request: &Request<Incoming>) -> Self {
-        Self {
-            inner: BytesMut::with_capacity((request.size_hint().lower() as usize).min(1024 * 16)),
-            frame_size: 0,
-        }
+    /// Create a new `WSGIRequestBody`.
+    pub fn new(py: Python<'_>) -> Result<Self, Error> {
+        Ok(Self {
+            inner: PY_BYTES_IO.call0(py)?,
+        })
     }
 
-    // Care needs to be taken if the remote is untrusted.
-    // The function doesn’t implement any length checks and an malicious peer might make it consume arbitrary amounts of memory.
-    // Anyway, wsgi is supposed to be used in behind reverse proxies.
+    /// Create a new `WSGIRequestBody` from given `BytesIO`.
+    /// Becareful, this function doesn't check the type of `BytesIO`.
+    pub fn from_input(input: PyObject) -> Self {
+        Self { inner: input }
+    }
+
+    /// Care needs to be taken if the remote is untrusted.
+    /// The function doesn’t implement any length checks and an malicious peer might make it consume arbitrary amounts of memory.
+    /// Anyway, wsgi is supposed to be used in behind reverse proxies.
     pub fn poll_from_request(
         &mut self,
         cx: &mut Context<'_>,
+        py: Python<'_>,
         request: &mut Request<Incoming>,
-    ) -> Poll<Result<(), hyper::Error>> {
+    ) -> Poll<Result<(), Error>> {
         while !request.is_end_stream() {
             let pin_request = Pin::new(&mut *request);
-            match pin_request.poll_frame(cx) {
-                Poll::Ready(Some(Ok(frame))) => {
+            match ready!(pin_request.poll_frame(cx)) {
+                Some(Ok(frame)) => {
                     if frame.is_trailers() {
                         // https://peps.python.org/pep-0444/#request-trailers-and-chunked-transfer-encoding
                         // When using chunked transfer encoding on request content, the RFCs allow there to be request trailers.
                         // These are like request headers but come after the final null data chunk. These trailers are only
                         // available when the chunked data stream is finite length and when it has all been read in. Neither WSGI nor Web3 currently supports them.
-                        continue;
+                        return Poll::Ready(Ok(()));
                     }
 
                     let bytes = frame.into_data().unwrap();
-
-                    // extend_from_slice already check the capacity.
-                    self.inner.extend_from_slice(&bytes);
-                    self.frame_size = self.frame_size.saturating_add(1);
+                    self.inner
+                        .call_method1(py, intern!(py, "write"), (&bytes as &[u8],))?;
                 }
-                Poll::Ready(Some(Err(err))) => return Poll::Ready(Err(err)),
-                Poll::Ready(None) => continue, // is_end_stream() return value of false does not guarantee that a value will be returned from poll_frame.
-                Poll::Pending => return Poll::Pending,
+                Some(Err(err)) => return Poll::Ready(Err(Error::from(err))),
+                None => continue, // is_end_stream() return value of false does not guarantee that a value will be returned from poll_frame.
             }
         }
 
         Poll::Ready(Ok(()))
     }
-}
 
-#[pymethods]
-impl WSGIRequestBody {
-    pub fn __iter__(pyself: PyRef<'_, Self>) -> PyRef<'_, Self> {
-        pyself
-    }
-
-    pub fn __next__<'p>(&mut self, py: Python<'p>) -> Option<&'p PyBytes> {
-        match self.inner.iter().position(|&c| c == LINE_SPLIT) {
-            // next_split is the index of line split.
-            // split_to will split the buffer to next_split + 1.
-            Some(next_split) => Some(PyBytes::new(
-                py,
-                &self.inner.split_to(next_split + 1).freeze(),
-            )),
-            None if !self.inner.is_empty() => Some(PyBytes::new(
-                py,
-                &self.inner.split_to(self.inner.len()).freeze(),
-            )),
-            None => None,
-        }
-    }
-
-    #[pyo3(signature = (size=None))]
-    pub fn read<'p>(&mut self, py: Python<'p>, size: Option<usize>) -> &'p PyBytes {
-        match size {
-            None => PyBytes::new(py, &self.inner.split_to(self.inner.len()).freeze()),
-            Some(size) => PyBytes::new(
-                py,
-                &self.inner.split_to(size.min(self.inner.len())).freeze(),
-            ),
-        }
-    }
-
-    #[pyo3(signature = (size=None))]
-    pub fn readline<'p>(&mut self, py: Python<'p>, size: Option<usize>) -> &'p PyBytes {
-        let iter_size = match size {
-            None => self.inner.len(),
-            Some(size) => size.min(self.inner.len()),
-        };
-
-        match self
-            .inner
-            .iter()
-            .take(iter_size)
-            .position(|&c| c == LINE_SPLIT)
-        {
-            // next_split is the index of line split.
-            // split_to will split the buffer to next_split + 1.
-            Some(next_split) => PyBytes::new(py, &self.inner.split_to(next_split + 1).freeze()),
-            None if !self.inner.is_empty() => {
-                PyBytes::new(py, &self.inner.split_to(iter_size).freeze())
-            }
-            None => PyBytes::new(py, b""),
-        }
-    }
-
-    #[pyo3(signature = (hint=None))]
-    pub fn readlines<'p>(&mut self, py: Python<'p>, hint: Option<usize>) -> &'p PyList {
-        let mut iter_size = match hint {
-            None => self.inner.len(),
-            // https://docs.python.org/3/library/io.html#io.IOBase.readlines
-            // hint values of 0 or less, as well as None, are treated as no hint.
-            Some(size) if size == 0 => self.inner.len(),
-            Some(size) => size.min(self.inner.len()),
-        };
-
-        // use frame_size to estimate the allocation size.
-        let mut lines: Vec<&PyBytes> = Vec::with_capacity(self.frame_size);
-        while iter_size > 0 {
-            match self
-                .inner
-                .iter()
-                .take(iter_size)
-                .position(|&c| c == LINE_SPLIT)
-            {
-                Some(next_split) => {
-                    lines.push(PyBytes::new(
-                        py,
-                        &self.inner.split_to(next_split + 1).freeze(),
-                    ));
-                    iter_size -= next_split + 1;
-                    self.frame_size = self.frame_size.saturating_sub(1);
-                }
-                None if !self.inner.is_empty() => {
-                    lines.push(PyBytes::new(py, &self.inner.split_to(iter_size).freeze()));
-                    iter_size = 0;
-                    self.frame_size = self.frame_size.saturating_sub(1);
-                }
-                None => break,
-            }
-        }
-
-        PyList::new(py, lines)
+    /// Consume the `WSGIRequestBody` and return the underlying `PyObject`.
+    /// The returned `PyObject` is a `BytesIO` object.
+    /// The `BytesIO` object is positioned at the start of the stream.
+    pub fn into_input(self, py: Python<'_>) -> Result<PyObject, Error> {
+        self.inner.call_method1(py, intern!(py, "seek"), (0,))?;
+        Ok(self.inner)
     }
 }
 
-pub struct WSGIEvironBuilder<'a> {
+struct WSGIEvironBuilder<'a> {
     rustgi: &'a crate::core::Rustgi,
     request: &'a Request<Incoming>,
 }
 
 impl<'a> WSGIEvironBuilder<'a> {
-    pub fn new(rustgi: &'a crate::core::Rustgi, request: &'a Request<Incoming>) -> Self {
+    fn new(rustgi: &'a crate::core::Rustgi, request: &'a Request<Incoming>) -> Self {
         Self { rustgi, request }
     }
 
     // https://peps.python.org/pep-3333/#environ-variables
-    pub fn build(self, environ: &PyDict, input: Py<WSGIRequestBody>) -> PyResult<()> {
+    fn build(self, environ: &PyDict, input: PyObject) -> Result<(), Error> {
         environ.set_item(
-            "REQUEST_METHOD",
+            intern!(environ.py(), "REQUEST_METHOD"),
             self.request.method().as_str(), // method as_str always returns a uppercase string
         )?;
-        environ.set_item("SCRIPT_NAME", "")?;
-        environ.set_item("PATH_INFO", self.request.uri().path())?;
-        environ.set_item("QUERY_STRING", self.request.uri().query().unwrap_or(""))?;
         environ.set_item(
-            "CONTENT_TYPE",
+            intern!(environ.py(), "SCRIPT_NAME"),
+            intern!(environ.py(), ""),
+        )?;
+        environ.set_item(
+            intern!(environ.py(), "PATH_INFO"),
+            self.request.uri().path(),
+        )?;
+        environ.set_item(
+            intern!(environ.py(), "QUERY_STRING"),
+            self.request.uri().query().unwrap_or(""),
+        )?;
+        environ.set_item(
+            intern!(environ.py(), "CONTENT_TYPE"),
             self.request
                 .headers()
                 .get(CONTENT_TYPE)
-                .map(|v| v.as_bytes()),
+                .map(|v| v.to_str().unwrap_or("")),
         )?;
         environ.set_item(
-            "CONTENT_LENGTH",
+            intern!(environ.py(), "CONTENT_LENGTH"),
             self.request
                 .headers()
                 .get(CONTENT_LENGTH)
-                .map(|v| v.as_bytes()),
+                .map(|v| v.to_str().unwrap_or("")),
         )?;
-        environ.set_item("SERVER_NAME", self.rustgi.get_host())?;
-        environ.set_item("SERVER_PORT", self.rustgi.get_port())?;
+        environ.set_item(intern!(environ.py(), "SERVER_NAME"), self.rustgi.get_host())?;
+        environ.set_item(intern!(environ.py(), "SERVER_PORT"), self.rustgi.get_port())?;
         match self.request.version() {
-            hyper::Version::HTTP_09 => environ.set_item("SERVER_PROTOCOL", "HTTP/0.9")?,
-            hyper::Version::HTTP_10 => environ.set_item("SERVER_PROTOCOL", "HTTP/1.0")?,
-            hyper::Version::HTTP_11 => environ.set_item("SERVER_PROTOCOL", "HTTP/1.1")?,
-            hyper::Version::HTTP_2 => environ.set_item("SERVER_PROTOCOL", "HTTP/2")?,
-            hyper::Version::HTTP_3 => environ.set_item("SERVER_PROTOCOL", "HTTP/3")?,
+            hyper::Version::HTTP_09 => environ.set_item(
+                intern!(environ.py(), "SERVER_PROTOCOL"),
+                intern!(environ.py(), "HTTP/0.9"),
+            )?,
+            hyper::Version::HTTP_10 => environ.set_item(
+                intern!(environ.py(), "SERVER_PROTOCOL"),
+                intern!(environ.py(), "HTTP/1.0"),
+            )?,
+            hyper::Version::HTTP_11 => environ.set_item(
+                intern!(environ.py(), "SERVER_PROTOCOL"),
+                intern!(environ.py(), "HTTP/1.1"),
+            )?,
+            hyper::Version::HTTP_2 => environ.set_item(
+                intern!(environ.py(), "SERVER_PROTOCOL"),
+                intern!(environ.py(), "HTTP/2"),
+            )?,
+            hyper::Version::HTTP_3 => environ.set_item(
+                intern!(environ.py(), "SERVER_PROTOCOL"),
+                intern!(environ.py(), "HTTP/3"),
+            )?,
             _ => unreachable!(),
         };
         for (name, value) in self.request.headers() {
             environ.set_item(
                 &format!("HTTP_{}", name.as_str().to_uppercase().replace('-', "_")),
-                value.as_bytes(),
+                value.to_str().unwrap_or(""),
             )?;
         }
-
-        environ.set_item("wsgi.version", (1, 0))?;
+        environ.set_item(intern!(environ.py(), "wsgi.version"), (1, 0))?;
         environ.set_item(
-            "wsgi.url_scheme",
+            intern!(environ.py(), "wsgi.url_scheme"),
             self.request.uri().scheme_str().unwrap_or("http"),
         )?;
         unsafe {
             PyDict_SetItemString(
                 environ.as_ptr(),
-                "wsgi.errors".as_ptr() as *const i8,
-                PySys_GetObject("stderr".as_ptr() as *const i8),
+                "wsgi.errors\0".as_ptr() as *const i8,
+                PySys_GetObject("stderr\0".as_ptr() as *const i8),
             )
         };
-        environ.set_item("wsgi.multithread", false)?;
-        environ.set_item("wsgi.multiprocess", false)?;
-        environ.set_item("wsgi.run_once", false)?;
-        environ.set_item("wsgi.input", input)?;
+        // tell Flask/other WSGI apps that the input has been terminated
+        environ.set_item(intern!(environ.py(), "wsgi.input_terminated"), true)?;
+        // it can be set to true if the application object is known to only support a single thread
+        environ.set_item(intern!(environ.py(), "wsgi.multithread"), true)?;
+        // it can be set to true if the application object is known to only support a single process
+        environ.set_item(intern!(environ.py(), "wsgi.multiprocess"), true)?;
+        environ.set_item(intern!(environ.py(), "wsgi.run_once"), false)?;
+        environ.set_item(intern!(environ.py(), "wsgi.input"), input)?;
 
         Ok(())
     }
@@ -344,8 +301,7 @@ impl<'a> WSGIEvironBuilder<'a> {
 #[derive(Default)]
 #[pyclass]
 struct WSGIResponseBuilder {
-    status: StatusCode,
-    headers: Vec<(String, String)>,
+    builder: Option<http::response::Builder>,
 }
 
 #[pymethods]
@@ -354,136 +310,154 @@ impl WSGIResponseBuilder {
     fn __call__(
         &mut self,
         status: &str,
-        headers: Vec<(String, String)>,
+        headers: Vec<(&str, &str)>,
         exc_info: Option<&PyTuple>,
-    ) {
-        self.status = StatusCode::from_str(status.split_once(' ').unwrap().0).unwrap();
-        self.headers = headers;
-        // TODO: exc_info
+    ) -> PyResult<()> {
         let _ = exc_info;
+        let status_pair = status
+            .split_once(' ')
+            .ok_or(PyValueError::new_err("invalid status"))?;
+
+        let mut builder =
+            hyper::Response::builder().status(StatusCode::from_str(status_pair.0).map_err(
+                |_| PyValueError::new_err(format!("invalid status code: {}", status_pair.0)),
+            )?);
+
+        for (name, value) in headers {
+            builder = builder.header(name, value);
+        }
+
+        self.builder.replace(builder);
+        Ok(())
     }
 }
 
 impl WSGIResponseBuilder {
-    /// Create a new WSGIResponseBuilder
-    fn build(&self, wsgi_return: PyObject) -> http::Result<hyper::Response<WSGIResponseBody>> {
-        let mut builder = hyper::Response::builder().status(self.status);
-
-        for (name, value) in &self.headers {
-            builder = builder.header(name, value);
+    fn build(
+        &mut self,
+        py: Python<'_>,
+        wsgi_iter: PyObject,
+    ) -> Result<hyper::Response<WSGIResponseBody>, Error> {
+        // If the wsgi_iter is a bytes object, we can just return it
+        // I don't want to iterate char by char
+        if unsafe { PyBytes_Check(wsgi_iter.as_ptr()) } == 1 {
+            return self
+                .builder
+                .take()
+                .unwrap_or_default()
+                .body(WSGIResponseBody::new(
+                    Some(PyBytesBuf::new(wsgi_iter.extract(py)?)),
+                    None,
+                ))
+                .map_err(Error::from);
         }
 
-        builder.body(WSGIResponseBody::new(wsgi_return))
+        self.builder
+            .take()
+            .unwrap_or_default()
+            .body(WSGIResponseBody::new(
+                None,
+                Some(wsgi_iter.as_ref(py).iter()?.into()),
+            ))
+            .map_err(Error::from)
     }
 }
 
-pub enum WSGIResponseBodyKind {
-    FullBytes(Full<Bytes>),
-    WSGI {
-        wsgi_return: PyObject,
-        is_end_stream: bool,
-    },
-}
-
 pub struct WSGIResponseBody {
-    kind: WSGIResponseBodyKind,
+    current_chunk: Option<PyBytesBuf>,
+    wsgi_iter: Option<Py<PyIterator>>,
 }
 
 impl WSGIResponseBody {
     /// Create a new WSGIResponseBody
-    pub fn new(wsgi_return: PyObject) -> Self {
+    pub fn new(current_chunk: Option<PyBytesBuf>, wsgi_iter: Option<Py<PyIterator>>) -> Self {
         Self {
-            kind: WSGIResponseBodyKind::WSGI {
-                wsgi_return,
-                is_end_stream: false,
-            },
+            current_chunk,
+            wsgi_iter,
         }
     }
 
-    /// Create a new WSGIResponseBody with full bytes
-    pub fn bytes(bytes: Bytes) -> Self {
+    /// Create an empty WSGIResponseBody
+    pub fn empty() -> Self {
         Self {
-            kind: WSGIResponseBodyKind::FullBytes(Full::new(bytes)),
+            current_chunk: None,
+            wsgi_iter: None,
         }
+    }
+
+    /// Take the current chunk
+    pub fn take_current_chunk(&mut self) -> Option<PyBytesBuf> {
+        self.current_chunk.take()
+    }
+
+    /// Poll the iterator for the next chunk
+    /// if the current chunk is None, it will poll the iterator and set the current chunk to the next chunk
+    /// if the current chunk is Some, it will do nothing
+    pub fn poll_from_iter(&mut self) -> Result<(), Error> {
+        if self.current_chunk.is_none() {
+            if let Some(ref iter) = self.wsgi_iter {
+                Python::with_gil(|py| -> Result<(), Error> {
+                    let mut iter = iter.as_ref(py);
+
+                    if let Some(next_chunk) = iter.next() {
+                        self.current_chunk
+                            .replace(PyBytesBuf::new(next_chunk?.extract()?));
+                    }
+
+                    Ok(())
+                })?;
+            }
+        }
+
+        // If the current chunk is still None, there is no more data
+        if self.current_chunk.is_none() {
+            self.wsgi_iter = None
+        }
+
+        Ok(())
     }
 }
 
 impl Body for WSGIResponseBody {
-    type Data = Bytes;
+    type Data = PyBytesBuf;
     type Error = Infallible;
 
+    /// Poll the iterator for the next chunk
     fn poll_frame(
         mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        _cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
-        match self.kind {
-            WSGIResponseBodyKind::FullBytes(ref mut bytes) => Pin::new(bytes).poll_frame(cx),
-            WSGIResponseBodyKind::WSGI {
-                ref wsgi_return,
-                ref mut is_end_stream,
-            } => {
-                if *is_end_stream {
-                    return Poll::Ready(None);
-                }
+        let chunk = self.take_current_chunk();
+        if let Err(err) = self.poll_from_iter() {
+            debug!("error polling from iterator: {}", err);
+        }
 
-                match Python::with_gil(
-                    |py| -> PyResult<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
-                        let mut wsgi_return_iter = wsgi_return.as_ref(py).iter()?;
-
-                        loop {
-                            match wsgi_return_iter.next() {
-                                Some(item) => {
-                                    let item = item?;
-
-                                    // skip empty bytes
-                                    if item.is_none() || item.len()? == 0 {
-                                        continue;
-                                    }
-
-                                    return Ok(Some(Ok(hyper::body::Frame::data(
-                                        Bytes::copy_from_slice(item.extract()?),
-                                    ))));
-                                }
-                                None => {
-                                    *is_end_stream = true;
-                                    return Ok(None);
-                                }
-                            }
-                        }
-                    },
-                ) {
-                    Ok(frame) => Poll::Ready(frame),
-                    Err(err) => {
-                        debug!("python iterator error: {}", err);
-                        *is_end_stream = true;
-                        Poll::Ready(None)
-                    }
-                }
-            }
+        match chunk {
+            Some(chunk) => std::task::Poll::Ready(Some(Ok(hyper::body::Frame::data(chunk)))),
+            None => std::task::Poll::Ready(None),
         }
     }
 
+    /// Check if the iterator is done
     fn is_end_stream(&self) -> bool {
-        match self.kind {
-            WSGIResponseBodyKind::FullBytes(ref bytes) => bytes.is_end_stream(),
-            WSGIResponseBodyKind::WSGI { is_end_stream, .. } => is_end_stream,
-        }
+        self.current_chunk.is_none() && self.wsgi_iter.is_none()
     }
 
+    /// Get the size hint
     fn size_hint(&self) -> hyper::body::SizeHint {
-        match self.kind {
-            WSGIResponseBodyKind::FullBytes(ref bytes) => bytes.size_hint(),
-            WSGIResponseBodyKind::WSGI { .. } => SizeHint::default(),
+        let mut sh = SizeHint::new();
+        if let Some(ref chunk) = self.current_chunk {
+            sh.set_lower(chunk.remaining() as u64);
         }
+
+        sh
     }
 }
 
 /// Create a 500 response.
-pub fn response_500() -> hyper::Response<WSGIResponseBody> {
+fn response_500() -> hyper::Response<WSGIResponseBody> {
     hyper::Response::builder()
         .status(StatusCode::INTERNAL_SERVER_ERROR)
-        .body(WSGIResponseBody::bytes(Bytes::from_static(
-            b"Internal Server Error",
-        )))
+        .body(WSGIResponseBody::empty())
         .unwrap()
 }

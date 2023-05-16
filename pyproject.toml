@@ -5,12 +5,28 @@ build-backend = "maturin"
 [project]
 name = "rustgi"
 requires-python = ">=3.7"
+authors = [
+    {name = "Lâm Hoàng Phúc", email = "eddiebrock2001@gmail.com"}
+]
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Python :: Implementation :: PyPy",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+    "Programming Language :: Python",
+    "Programming Language :: Rust",
+    "Topic :: Internet :: WWW/HTTP"
 ]
 
-
 [tool.maturin]
-features = ["pyo3/extension-module"]
+bindings = "pyo3"
+features = ["python"]
+profile = "release"

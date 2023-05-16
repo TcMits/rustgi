@@ -1,5 +1,6 @@
 pub mod core;
-pub mod wsgi;
-pub mod server;
+pub mod error;
+#[cfg(feature = "python")]
 mod rustgi;
-
+pub mod types;
+pub mod wsgi;
