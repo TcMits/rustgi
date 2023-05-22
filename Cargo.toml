@@ -9,15 +9,13 @@ name = "rustgi"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-futures = { version = "0.3.28", optional = true }
 http = "0.2.9"
 hyper = { version = "1.0.0-rc.3", features = ["server", "http1"] }
 lazy_static = "1.4.0"
-libc = { version ="0.2.144", optional = true }
-log = "0.4.17"
 pyo3 = "0.18.3"
 pyo3-log = { version = "0.8.1", optional = true }
-tokio = { version = "1.28.0", features = ["net", "signal", "rt"] , optional = true }
+log = { version = "0.4.17", optional = true }
+tokio = { version = "1.28.0", features = ["macros", "net", "signal", "rt", "rt-multi-thread"] , optional = true }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 jemallocator = { version = "0.5", features = ["disable_initial_exec_tls"], optional = true }
@@ -26,8 +24,11 @@ jemallocator = { version = "0.5", features = ["disable_initial_exec_tls"], optio
 rustgi = { path = ".", features = ["python"] }
 
 [features]
-python = ["dep:tokio", "dep:jemallocator", "dep:libc", "pyo3/extension-module", "dep:pyo3-log", "dep:futures"]
+python = ["dep:tokio", "dep:jemallocator", "pyo3/extension-module", "dep:log", "dep:pyo3-log"]
 
 [profile.release]
 lto = true
 opt-level = 3
+strip = true
+debug = false
+codegen-units = 1

@@ -1,4 +1,5 @@
 import httpx
+import pytest
 
 HOST = "0.0.0.0:8000"
 
@@ -37,6 +38,5 @@ def test_wsgi():
         assert r.status_code == 200
         assert r.text == LARGE_BODY
 
-        r = client.get("/err_app")
-        assert r.status_code == 500
-
+        with pytest.raises(httpx.RemoteProtocolError):
+            client.get("/err_app")
