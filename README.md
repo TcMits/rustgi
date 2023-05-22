@@ -30,7 +30,7 @@ rustgi.serve(
 
 ## Performance
 
-rustgi aims to provide high performance and efficient request handling. While it is still under development and based on the [hyper rc3](https://github.com/hyperium/hyper), it may not be as stable as mature WSGI servers. However, it strives to offer comparable performance to servers like [bjoern.](https://github.com/jonashaag/bjoern).
+rustgi aims to provide high performance and efficient request handling. While it is still under development and based on the [hyper rc3](https://github.com/hyperium/hyper), it may not be as stable as mature WSGI servers. However, it strives to offer comparable performance to servers like [bjoern](https://github.com/jonashaag/bjoern).
 
 ### Benchmarks
 
