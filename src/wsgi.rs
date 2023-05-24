@@ -1,6 +1,6 @@
 use crate::{
     error::Error,
-    gil::{poll_gil, with_gil_unchecked},
+    gil::{with_gil_unchecked, GILFuture},
     types::PyBytesBuf,
 };
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE};
@@ -59,6 +59,7 @@ pub struct WSGIFuture {
     rustgi: crate::core::Rustgi,
     request: Request<Incoming>,
     wsgi_request_body: Option<WSGIRequestBody>,
+    gil_future: GILFuture,
 }
 
 impl WSGIFuture {
@@ -68,6 +69,7 @@ impl WSGIFuture {
             rustgi,
             request,
             wsgi_request_body: None,
+            gil_future: GILFuture::new(),
         }
     }
 }
@@ -78,10 +80,10 @@ impl Future for WSGIFuture {
     /// Poll the WSGI application.
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut py_context = Context::from_waker(cx.waker());
+        let this = self.get_mut();
 
-        match ready!(ready!(poll_gil(
+        ready!(this.gil_future.poll_gil(
             |py| -> Poll<Result<hyper::Response<WSGIResponseBody>, Error>> {
-                let this = self.get_mut();
                 let pool = unsafe { py.new_pool() };
 
                 // fulfill the request body
@@ -106,39 +108,28 @@ impl Future for WSGIFuture {
                     body
                 };
 
-                let wsgi_response_builder = Py::new(py, WSGIResponseBuilder::default())?;
-
                 // call the WSGI application
-                let wsgi_iter = {
+                let builder = {
                     let py = pool.python();
+                    let wsgi_response_config = Py::new(py, WSGIResponseConfig::default())?;
 
                     let environ = PyDict::new(py);
                     WSGIEvironBuilder::new(&this.rustgi, &this.request)
                         .build(environ, body.into_input(py)?)?;
 
-                    this.rustgi
+                    let wsgi_iter = this
+                        .rustgi
                         .get_wsgi_app()
-                        .call1(py, (environ, wsgi_response_builder.clone()))?
+                        .call1(py, (environ, wsgi_response_config.clone()))?;
+
+                    let mut config = wsgi_response_config.as_ref(py).borrow_mut();
+                    config.take_builder(wsgi_iter)
                 };
 
-                let mut builder = wsgi_response_builder.as_ref(py).borrow_mut();
-                Poll::Ready(builder.build(py, wsgi_iter))
+                Poll::Ready(builder.build(py))
             },
             cx,
-        ))) {
-            Ok(mut response) => {
-                // ensure first chunk is non-empty
-                // i have to call poll_from_iter here because of "PyError: RuntimeError: Already borrowed" :P
-                if let Poll::Ready(Err(err)) =
-                    poll_gil(|py| response.body_mut().poll_from_iter(py), cx)
-                {
-                    return Poll::Ready(Err(err));
-                }
-
-                Poll::Ready(Ok(response))
-            }
-            any => Poll::Ready(any),
-        }
+        ))
     }
 }
 
@@ -304,12 +295,13 @@ impl<'a> WSGIEvironBuilder<'a> {
 
 #[derive(Default)]
 #[pyclass]
-struct WSGIResponseBuilder {
+struct WSGIResponseConfig {
     builder: Option<http::response::Builder>,
+    content_length: Option<u64>,
 }
 
 #[pymethods]
-impl WSGIResponseBuilder {
+impl WSGIResponseConfig {
     #[pyo3(signature = (status, headers, exc_info=None))]
     fn __call__(
         &mut self,
@@ -329,6 +321,11 @@ impl WSGIResponseBuilder {
 
         for (name, value) in headers {
             builder = builder.header(name, value);
+            if name.eq_ignore_ascii_case(CONTENT_LENGTH.as_str()) {
+                self.content_length = Some(value.parse().map_err(|_| {
+                    PyValueError::new_err(format!("invalid content-length: {}", value))
+                })?);
+            }
         }
 
         self.builder.replace(builder);
@@ -336,13 +333,50 @@ impl WSGIResponseBuilder {
     }
 }
 
+impl WSGIResponseConfig {
+    fn take_builder(&mut self, wsgi_iter: PyObject) -> WSGIResponseBuilder {
+        WSGIResponseBuilder {
+            builder: self.builder.take().unwrap_or_default(),
+            content_length: self.content_length,
+            wsgi_iter,
+        }
+    }
+}
+
+/// WSGI response builder.
+pub struct WSGIResponseBuilder {
+    builder: http::response::Builder,
+    content_length: Option<u64>,
+    wsgi_iter: PyObject,
+}
+
 impl WSGIResponseBuilder {
-    fn build(
-        &mut self,
-        py: Python<'_>,
-        mut wsgi_iter: PyObject,
-    ) -> Result<hyper::Response<WSGIResponseBody>, Error> {
+    /// Create a new WSGI response builder.
+    /// Becareful this function does not check the type of the wsgi_iter.
+    pub fn new(wsgi_iter: PyObject) -> Self {
+        Self {
+            builder: http::response::Builder::new(),
+            content_length: None,
+            wsgi_iter,
+        }
+    }
+
+    /// Set the content length of the response.
+    pub fn set_content_length(&mut self, content_length: Option<u64>) {
+        self.content_length = content_length;
+    }
+
+    /// Set the response builder.
+    pub fn set_builder(&mut self, builder: http::response::Builder) {
+        self.builder = builder;
+    }
+}
+
+impl WSGIResponseBuilder {
+    pub fn build(self, py: Python<'_>) -> Result<hyper::Response<WSGIResponseBody>, Error> {
         // optimize for the common case of a single string
+        let mut wsgi_iter = self.wsgi_iter;
+
         if unsafe { PyList_Check(wsgi_iter.as_ptr()) } == 1
             && unsafe { PyList_Size(wsgi_iter.as_ptr()) } == 1
         {
@@ -351,32 +385,30 @@ impl WSGIResponseBuilder {
 
         // If the wsgi_iter is a bytes object, we can just return it
         // I don't want to iterate char by char
-        if unsafe { PyBytes_Check(wsgi_iter.as_ptr()) } == 1 {
-            return self
-                .builder
-                .take()
-                .unwrap_or_default()
-                .body(WSGIResponseBody::new(
-                    Some(PyBytesBuf::new(wsgi_iter.extract(py)?)),
-                    None,
-                ))
-                .map_err(Error::from);
-        }
+        let mut body = match unsafe { PyBytes_Check(wsgi_iter.as_ptr()) } {
+            1 => WSGIResponseBody::new(Some(PyBytesBuf::new(wsgi_iter.extract(py)?)), None),
+            _ => {
+                let mut iter = wsgi_iter.as_ref(py).iter()?;
+                match iter.next() {
+                    Some(chunk) => WSGIResponseBody::new(
+                        Some(PyBytesBuf::new(chunk?.extract()?)),
+                        Some(iter.into()),
+                    ),
+                    None => WSGIResponseBody::empty(),
+                }
+            }
+        };
 
-        self.builder
-            .take()
-            .unwrap_or_default()
-            .body(WSGIResponseBody::new(
-                None,
-                Some(wsgi_iter.as_ref(py).iter()?.into()),
-            ))
-            .map_err(Error::from)
+        body.set_content_length(self.content_length);
+        self.builder.body(body).map_err(Error::from)
     }
 }
 
 pub struct WSGIResponseBody {
     current_chunk: Option<PyBytesBuf>,
     wsgi_iter: Option<Py<PyIterator>>,
+    gil_future: GILFuture,
+    content_length: Option<u64>,
 }
 
 impl WSGIResponseBody {
@@ -385,6 +417,8 @@ impl WSGIResponseBody {
         Self {
             current_chunk,
             wsgi_iter,
+            gil_future: GILFuture::new(),
+            content_length: None,
         }
     }
 
@@ -393,7 +427,14 @@ impl WSGIResponseBody {
         Self {
             current_chunk: None,
             wsgi_iter: None,
+            gil_future: GILFuture::new(),
+            content_length: Some(0),
         }
+    }
+
+    /// set content length, it will be used for size hint
+    pub fn set_content_length(&mut self, content_length: Option<u64>) {
+        self.content_length = content_length;
     }
 
     /// Take the current chunk
@@ -404,15 +445,21 @@ impl WSGIResponseBody {
     /// Poll the iterator for the next chunk
     /// if the current chunk is None, it will poll the iterator and set the current chunk to the next chunk
     /// if the current chunk is Some, it will do nothing
-    pub fn poll_from_iter(&mut self, py: Python<'_>) -> Result<(), Error> {
+    pub fn poll_from_iter(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
         if self.current_chunk.is_none() {
             if let Some(ref iter) = self.wsgi_iter {
-                let mut iter = iter.as_ref(py);
+                ready!(self.gil_future.poll_gil(
+                    |py| {
+                        let mut iter = iter.as_ref(py);
+                        if let Some(next_chunk) = iter.next() {
+                            self.current_chunk
+                                .replace(PyBytesBuf::new(next_chunk?.extract()?));
+                        }
 
-                if let Some(next_chunk) = iter.next() {
-                    self.current_chunk
-                        .replace(PyBytesBuf::new(next_chunk?.extract()?));
-                }
+                        Result::<(), Error>::Ok(())
+                    },
+                    cx,
+                ))?;
             }
         }
 
@@ -421,7 +468,7 @@ impl WSGIResponseBody {
             self.wsgi_iter = None
         }
 
-        Ok(())
+        Poll::Ready(Ok(()))
     }
 }
 
@@ -434,15 +481,17 @@ impl Body for WSGIResponseBody {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        // first poll to ensure current chunk is not None
+        // pending here means that the iterator is not ready yet
+        // and current_chunk is None
+        ready!(self.poll_from_iter(cx))?;
+
+        // take the current chunk, it is guaranteed to be Some
         let chunk = self.take_current_chunk();
-        let poll_result = poll_gil(|py| self.poll_from_iter(py), cx);
 
         match chunk {
-            Some(chunk) => std::task::Poll::Ready(Some(Ok(hyper::body::Frame::data(chunk)))),
-            None => match ready!(poll_result) {
-                Err(err) => Poll::Ready(Some(Err(err))),
-                _ => Poll::Ready(None),
-            },
+            Some(chunk) => Poll::Ready(Some(Ok(hyper::body::Frame::data(chunk)))),
+            _ => Poll::Ready(None),
         }
     }
 
@@ -455,9 +504,15 @@ impl Body for WSGIResponseBody {
     fn size_hint(&self) -> hyper::body::SizeHint {
         let mut sh = SizeHint::new();
 
+        // If the content length is set, we can use it as the exact size
+        if let Some(content_length) = self.content_length {
+            sh.set_exact(content_length);
+            return sh;
+        }
+
         // If the current chunk is Some, we can use it's size as the lower bound
         if let Some(ref chunk) = self.current_chunk {
-            sh.set_lower(chunk.remaining() as u64);
+            sh.set_lower((chunk.remaining() as u64).max(sh.lower()));
         }
 
         // If the iterator is None, we are done

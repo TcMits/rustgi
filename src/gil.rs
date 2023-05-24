@@ -1,19 +1,17 @@
-use std::{
-    cell::Cell,
-    sync::Mutex,
-    task::{Context, Poll, Waker},
-};
-
+use event_listener::{Event, EventListener};
 use lazy_static::lazy_static;
 use pyo3::Python;
-use std::mem::MaybeUninit;
-
-static GIL_LOCK: Mutex<()> = Mutex::new(());
-const GIL_WAKERS_LENGTH: usize = 1000;
+use std::{
+    cell::Cell,
+    future::Future,
+    pin::Pin,
+    sync::Mutex,
+    task::{ready, Context, Poll},
+};
 
 lazy_static! {
-    static ref GIL_WAKERS: Mutex<(usize, [MaybeUninit<Waker>; GIL_WAKERS_LENGTH])> =
-        Mutex::new((0, unsafe { MaybeUninit::uninit().assume_init() }));
+    static ref GIL_LOCK: Mutex<()> = Mutex::new(());
+    static ref GIL_UNLOCK_EVENT: Event = Event::new();
 }
 
 thread_local! {
@@ -49,42 +47,38 @@ where
     Python::with_gil(|py| f(py))
 }
 
-/// Call the given closure with a Python instance.
-/// If the GIL is held in another thread, the closure will be called later.
-pub(crate) fn poll_gil<F, R>(f: F, cx: &mut Context<'_>) -> Poll<R>
-where
-    F: for<'py> FnOnce(Python<'py>) -> R,
-{
-    if is_gil_acquired_in_this_thread() {
-        return Poll::Ready(with_gil_unchecked(f));
+// A future that resolves when the GIL is acquired.
+pub(crate) struct GILFuture {
+    listener: Option<EventListener>,
+}
+
+impl GILFuture {
+    pub(crate) fn new() -> Self {
+        Self { listener: None }
     }
 
-    let lock = match GIL_LOCK.try_lock() {
-        Ok(guard) => guard,
-        Err(_) => {
-            let mut wakers = GIL_WAKERS.lock().unwrap();
-            let (ref mut index, ref mut wakers) = &mut *wakers;
-            if *index >= GIL_WAKERS_LENGTH {
-                // max wakers reached, reschedule the task immediately.
-                cx.waker().wake_by_ref();
-                return Poll::Pending;
+    pub(crate) fn poll_gil<F, R>(&mut self, f: F, cx: &mut Context<'_>) -> Poll<R>
+    where
+        F: for<'py> FnOnce(Python<'py>) -> R,
+    {
+        if is_gil_acquired_in_this_thread() {
+            return Poll::Ready(with_gil_unchecked(f));
+        }
+
+        loop {
+            if let Ok(guard) = GIL_LOCK.try_lock() {
+                let result = Poll::Ready(with_gil_unchecked(f));
+                drop(guard);
+                GIL_UNLOCK_EVENT.notify(1);
+                return result;
             }
 
-            wakers[*index].write(cx.waker().clone());
-            *index += 1;
-            return Poll::Pending;
+            if self.listener.is_none() {
+                self.listener.replace(GIL_UNLOCK_EVENT.listen());
+            }
+
+            ready!(Pin::new(self.listener.as_mut().unwrap()).poll(cx));
+            self.listener.take();
         }
-    };
-
-    let result = Poll::Ready(with_gil_unchecked(f));
-    drop(lock);
-
-    // drain wakers
-    let mut wakers = GIL_WAKERS.lock().unwrap();
-    let (ref mut len, ref mut wakers) = &mut *wakers;
-    for w in wakers.iter().take(*len) {
-        unsafe { w.assume_init_ref() }.wake_by_ref();
     }
-    *len = 0;
-    result
 }

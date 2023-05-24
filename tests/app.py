@@ -24,11 +24,13 @@ def info(environ, protocol):
 
 
 def echo(environ, protocol):
+    response = environ['wsgi.input'].read()
     protocol(
         '200 OK',
-        [('content-type', 'text/plain; charset=utf-8')]
+        [('content-type', 'text/plain; charset=utf-8'), ("content-length", str(len(response)))]
     )
-    return [environ['wsgi.input'].read()]
+
+    return [response]
 
 def echo_iter(environ, protocol):
     protocol(
