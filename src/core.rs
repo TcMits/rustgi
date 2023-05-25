@@ -50,22 +50,27 @@ pub struct Rustgi {
 }
 
 impl Rustgi {
+    #[inline]
     pub fn new(app: PyObject) -> Self {
         RustgiBuilder::new(app).build()
     }
 
+    #[inline]
     pub fn get_wsgi_app(&self) -> PyObject {
         self.inner.app.clone()
     }
 
+    #[inline]
     pub fn get_host(&self) -> &str {
         &self.inner.host
     }
 
+    #[inline]
     pub fn get_port(&self) -> Option<u16> {
         self.inner.port
     }
 
+    #[inline]
     pub fn wsgi_caller(&self) -> crate::wsgi::WSGICaller {
         crate::wsgi::WSGICaller::new(self.clone())
     }

@@ -39,6 +39,7 @@ pub struct WSGICaller {
 }
 
 impl WSGICaller {
+    #[inline]
     pub(crate) fn new(rustgi: crate::core::Rustgi) -> Self {
         Self { rustgi }
     }
@@ -50,6 +51,7 @@ impl Service<Request<Incoming>> for WSGICaller {
     type Future = WSGIFuture;
 
     /// Call the WSGI application.
+    #[inline]
     fn call(&mut self, req: Request<Incoming>) -> Self::Future {
         WSGIFuture::new(self.rustgi.clone(), req)
     }
@@ -64,6 +66,7 @@ pub struct WSGIFuture {
 
 impl WSGIFuture {
     /// Create a new `WSGIFuture` from the given `Rustgi` and `Request`.
+    #[inline]
     pub(crate) fn new(rustgi: crate::core::Rustgi, request: Request<Incoming>) -> Self {
         Self {
             rustgi,
@@ -139,6 +142,7 @@ pub struct WSGIRequestBody {
 
 impl WSGIRequestBody {
     /// Create a new `WSGIRequestBody`.
+    #[inline]
     pub fn new(py: Python<'_>) -> Result<Self, Error> {
         Ok(Self {
             inner: PY_BYTES_IO.call0(py)?,
@@ -147,6 +151,7 @@ impl WSGIRequestBody {
 
     /// Create a new `WSGIRequestBody` from given `BytesIO`.
     /// Becareful, this function doesn't check the type of `BytesIO`.
+    #[inline]
     pub fn from_input(input: PyObject) -> Self {
         Self { inner: input }
     }
@@ -187,6 +192,7 @@ impl WSGIRequestBody {
     /// Consume the `WSGIRequestBody` and return the underlying `PyObject`.
     /// The returned `PyObject` is a `BytesIO` object.
     /// The `BytesIO` object is positioned at the start of the stream.
+    #[inline]
     pub fn into_input(self, py: Python<'_>) -> Result<PyObject, Error> {
         self.inner.call_method1(py, intern!(py, "seek"), (0,))?;
         Ok(self.inner)
@@ -199,6 +205,7 @@ struct WSGIEvironBuilder<'a> {
 }
 
 impl<'a> WSGIEvironBuilder<'a> {
+    #[inline]
     fn new(rustgi: &'a crate::core::Rustgi, request: &'a Request<Incoming>) -> Self {
         Self { rustgi, request }
     }
@@ -334,6 +341,7 @@ impl WSGIResponseConfig {
 }
 
 impl WSGIResponseConfig {
+    #[inline]
     fn take_builder(&mut self, wsgi_iter: PyObject) -> WSGIResponseBuilder {
         WSGIResponseBuilder {
             builder: self.builder.take().unwrap_or_default(),
@@ -353,6 +361,7 @@ pub struct WSGIResponseBuilder {
 impl WSGIResponseBuilder {
     /// Create a new WSGI response builder.
     /// Becareful this function does not check the type of the wsgi_iter.
+    #[inline]
     pub fn new(wsgi_iter: PyObject) -> Self {
         Self {
             builder: http::response::Builder::new(),
@@ -362,11 +371,13 @@ impl WSGIResponseBuilder {
     }
 
     /// Set the content length of the response.
+    #[inline]
     pub fn set_content_length(&mut self, content_length: Option<u64>) {
         self.content_length = content_length;
     }
 
     /// Set the response builder.
+    #[inline]
     pub fn set_builder(&mut self, builder: http::response::Builder) {
         self.builder = builder;
     }
@@ -413,6 +424,7 @@ pub struct WSGIResponseBody {
 
 impl WSGIResponseBody {
     /// Create a new WSGIResponseBody
+    #[inline]
     pub fn new(current_chunk: Option<PyBytesBuf>, wsgi_iter: Option<Py<PyIterator>>) -> Self {
         Self {
             current_chunk,
@@ -423,6 +435,7 @@ impl WSGIResponseBody {
     }
 
     /// Create an empty WSGIResponseBody
+    #[inline]
     pub fn empty() -> Self {
         Self {
             current_chunk: None,
@@ -433,11 +446,13 @@ impl WSGIResponseBody {
     }
 
     /// set content length, it will be used for size hint
+    #[inline]
     pub fn set_content_length(&mut self, content_length: Option<u64>) {
         self.content_length = content_length;
     }
 
     /// Take the current chunk
+    #[inline]
     pub fn take_current_chunk(&mut self) -> Option<PyBytesBuf> {
         self.current_chunk.take()
     }
@@ -496,11 +511,13 @@ impl Body for WSGIResponseBody {
     }
 
     /// Check if the iterator is done
+    #[inline]
     fn is_end_stream(&self) -> bool {
         self.current_chunk.is_none() && self.wsgi_iter.is_none()
     }
 
     /// Get the size hint
+    #[inline]
     fn size_hint(&self) -> hyper::body::SizeHint {
         let mut sh = SizeHint::new();
 

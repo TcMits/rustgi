@@ -6,7 +6,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::Mutex,
-    task::{ready, Context, Poll},
+    task::{Context, Poll},
 };
 
 lazy_static! {
@@ -19,6 +19,7 @@ thread_local! {
     static THREAD_GIL_COUNT: Cell<usize> = Cell::new(0);
 }
 
+#[inline]
 fn is_gil_acquired_in_this_thread() -> bool {
     THREAD_GIL_COUNT.with(|count| count.get() > 0)
 }
@@ -26,6 +27,7 @@ fn is_gil_acquired_in_this_thread() -> bool {
 struct GILLocalCounter;
 
 impl GILLocalCounter {
+    #[inline]
     fn new() -> Self {
         THREAD_GIL_COUNT.with(|count| count.set(count.get().saturating_add(1)));
         Self
@@ -33,12 +35,14 @@ impl GILLocalCounter {
 }
 
 impl Drop for GILLocalCounter {
+    #[inline]
     fn drop(&mut self) {
         THREAD_GIL_COUNT.with(|count| count.set(count.get().saturating_sub(1)));
     }
 }
 
 /// Call the given closure with a Python instance.
+#[inline]
 pub(crate) fn with_gil_unchecked<F, R>(f: F) -> R
 where
     F: for<'py> FnOnce(Python<'py>) -> R,
@@ -48,11 +52,13 @@ where
 }
 
 // A future that resolves when the GIL is acquired.
+// GILFuture is designed to be used in one task/future.
 pub(crate) struct GILFuture {
     listener: Option<EventListener>,
 }
 
 impl GILFuture {
+    #[inline]
     pub(crate) fn new() -> Self {
         Self { listener: None }
     }
@@ -66,19 +72,33 @@ impl GILFuture {
         }
 
         loop {
+            // listener always None in first loop.
+            //
+            // if listener is not None, it means this task is waked up by GIL_UNLOCK_EVENT.
+            // so if we can acquire the GIL, we can drop this listener to notify
+            // another listener.
+            let mut listener = self.listener.take();
+
             if let Ok(guard) = GIL_LOCK.try_lock() {
                 let result = Poll::Ready(with_gil_unchecked(f));
                 drop(guard);
-                GIL_UNLOCK_EVENT.notify(1);
+
+                if listener.is_none() {
+                    GIL_UNLOCK_EVENT.notify(1);
+                }
+
+                // returning here will drop the listener to notify another listener.
                 return result;
             }
 
-            if self.listener.is_none() {
-                self.listener.replace(GIL_UNLOCK_EVENT.listen());
+            if listener.is_none() {
+                listener.replace(GIL_UNLOCK_EVENT.listen());
             }
 
-            ready!(Pin::new(self.listener.as_mut().unwrap()).poll(cx));
-            self.listener.take();
+            if let Poll::Pending = Pin::new(listener.as_mut().unwrap()).poll(cx) {
+                self.listener = listener;
+                return Poll::Pending;
+            }
         }
     }
 }
