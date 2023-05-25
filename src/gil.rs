@@ -5,12 +5,12 @@ use std::{
     cell::Cell,
     future::Future,
     pin::Pin,
-    sync::Mutex,
+    sync::atomic::{AtomicBool, Ordering},
     task::{Context, Poll},
 };
 
 lazy_static! {
-    static ref GIL_LOCK: Mutex<()> = Mutex::new(());
+    static ref GIL_LOCK: AtomicBool = AtomicBool::new(false);
     static ref GIL_UNLOCK_EVENT: Event = Event::new();
 }
 
@@ -63,6 +63,18 @@ impl GILFuture {
         Self { listener: None }
     }
 
+    #[inline]
+    fn try_lock(&mut self) -> bool {
+        // previous value is false, so we can acquire the GIL.
+        !GIL_LOCK.swap(true, Ordering::Acquire)
+    }
+
+    #[inline]
+    fn unlock(&mut self) {
+        // force release the lock.
+        GIL_LOCK.store(false, Ordering::Release);
+    }
+
     pub(crate) fn poll_gil<F, R>(&mut self, f: F, cx: &mut Context<'_>) -> Poll<R>
     where
         F: for<'py> FnOnce(Python<'py>) -> R,
@@ -79,9 +91,9 @@ impl GILFuture {
             // another listener.
             let mut listener = self.listener.take();
 
-            if let Ok(guard) = GIL_LOCK.try_lock() {
+            if self.try_lock() {
                 let result = Poll::Ready(with_gil_unchecked(f));
-                drop(guard);
+                self.unlock();
 
                 if listener.is_none() {
                     GIL_UNLOCK_EVENT.notify(1);
