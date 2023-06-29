@@ -86,6 +86,7 @@ impl Future for WSGIFuture {
         let this = self.get_mut();
 
         ready!(this.gil_future.poll_gil(
+            cx,
             |py| -> Poll<Result<hyper::Response<WSGIResponseBody>, Error>> {
                 let pool = unsafe { py.new_pool() };
 
@@ -99,7 +100,7 @@ impl Future for WSGIFuture {
 
                     let mut body = this.wsgi_request_body.take().unwrap();
 
-                    match body.poll_from_request(py, &mut this.request, &mut py_context) {
+                    match body.poll_from_request(py, &mut py_context, &mut this.request) {
                         Poll::Ready(Ok(())) => (),
                         Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                         Poll::Pending => {
@@ -131,7 +132,6 @@ impl Future for WSGIFuture {
 
                 Poll::Ready(builder.build(py))
             },
-            cx,
         ))
     }
 }
@@ -162,8 +162,8 @@ impl WSGIRequestBody {
     pub fn poll_from_request(
         &mut self,
         py: Python<'_>,
-        request: &mut Request<Incoming>,
         cx: &mut Context<'_>,
+        request: &mut Request<Incoming>,
     ) -> Poll<Result<(), Error>> {
         while !request.is_end_stream() {
             let pin_request = Pin::new(&mut *request);
@@ -461,18 +461,15 @@ impl WSGIResponseBody {
     pub fn poll_from_iter(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
         if self.current_chunk.is_none() {
             if let Some(ref iter) = self.wsgi_iter {
-                ready!(self.gil_future.poll_gil(
-                    |py| {
-                        let mut iter = iter.as_ref(py);
-                        if let Some(next_chunk) = iter.next() {
-                            self.current_chunk
-                                .replace(PyBytesBuf::new(next_chunk?.extract()?));
-                        }
+                ready!(self.gil_future.poll_gil(cx, |py| {
+                    let mut iter = iter.as_ref(py);
+                    if let Some(next_chunk) = iter.next() {
+                        self.current_chunk
+                            .replace(PyBytesBuf::new(next_chunk?.extract()?));
+                    }
 
-                        Result::<(), Error>::Ok(())
-                    },
-                    cx,
-                ))?;
+                    Result::<(), Error>::Ok(())
+                },))?;
             }
         }
 

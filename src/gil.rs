@@ -75,7 +75,7 @@ impl GILFuture {
         GIL_LOCK.store(false, Ordering::Release);
     }
 
-    pub(crate) fn poll_gil<F, R>(&mut self, f: F, cx: &mut Context<'_>) -> Poll<R>
+    pub(crate) fn poll_gil<F, R>(&mut self, cx: &mut Context<'_>, f: F) -> Poll<R>
     where
         F: for<'py> FnOnce(Python<'py>) -> R,
     {
