@@ -72,20 +72,16 @@ fn serve(py: Python<'_>, app: PyObject, config: &RustgiConfig) -> PyResult<()> {
         rustgi_builder.set_port(Some(tcp_listener.local_addr()?.port()));
         let rustgi = rustgi_builder.build();
 
-        // hyper service
-        let service_builder = Builder::new();
-
         // server loop
         let server = async {
             let tcp_listener = tokio::net::TcpListener::from_std(tcp_listener)?;
 
             loop {
                 let (stream, _) = tcp_listener.accept().await?;
-
-                let service = service_builder.serve_connection(stream, rustgi.wsgi_caller());
+                let wsgi_caller = rustgi.wsgi_caller();
 
                 runtime.spawn(async move {
-                    if let Err(e) = service.await {
+                    if let Err(e) = Builder::new().serve_connection(stream, wsgi_caller).await {
                         debug!("server connection error: {}", e);
                     }
                 });

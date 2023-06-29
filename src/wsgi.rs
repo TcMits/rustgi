@@ -289,9 +289,7 @@ impl<'a> WSGIEvironBuilder<'a> {
         };
         // tell Flask/other WSGI apps that the input has been terminated
         environ.set_item(intern!(environ.py(), "wsgi.input_terminated"), true)?;
-        // it can be set to true if the application object is known to only support a single thread
         environ.set_item(intern!(environ.py(), "wsgi.multithread"), true)?;
-        // it can be set to true if the application object is known to only support a single process
         environ.set_item(intern!(environ.py(), "wsgi.multiprocess"), true)?;
         environ.set_item(intern!(environ.py(), "wsgi.run_once"), false)?;
         environ.set_item(intern!(environ.py(), "wsgi.input"), input)?;
@@ -529,7 +527,7 @@ impl Body for WSGIResponseBody {
 
         // If the current chunk is Some, we can use it's size as the lower bound
         if let Some(ref chunk) = self.current_chunk {
-            sh.set_lower((chunk.remaining() as u64).max(sh.lower()));
+            sh.set_lower(chunk.remaining() as u64);
         }
 
         // If the iterator is None, we are done
