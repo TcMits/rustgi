@@ -93,12 +93,10 @@ impl Future for WSGIFuture {
                 // fulfill the request body
                 let body = {
                     let py = pool.python();
-
-                    if this.wsgi_request_body.is_none() {
-                        this.wsgi_request_body.replace(WSGIRequestBody::new(py)?);
-                    }
-
-                    let mut body = this.wsgi_request_body.take().unwrap();
+                    let mut body = this
+                        .wsgi_request_body
+                        .take()
+                        .unwrap_or(WSGIRequestBody::new(py)?);
 
                     match body.poll_from_request(py, &mut py_context, &mut this.request) {
                         Poll::Ready(Ok(())) => (),
@@ -116,15 +114,15 @@ impl Future for WSGIFuture {
                 let builder = {
                     let py = pool.python();
                     let wsgi_response_config = Py::new(py, WSGIResponseConfig::default())?;
-
                     let environ = PyDict::new(py);
+
                     WSGIEvironBuilder::new(&this.rustgi, &this.request)
                         .build(environ, body.into_input(py)?)?;
 
                     let wsgi_iter = this
                         .rustgi
                         .get_wsgi_app()
-                        .call1(py, (environ, wsgi_response_config.clone()))?;
+                        .call1(py, (environ, &wsgi_response_config))?;
 
                     let mut config = wsgi_response_config.as_ref(py).borrow_mut();
                     config.take_builder(wsgi_iter)
