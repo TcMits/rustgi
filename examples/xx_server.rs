@@ -32,5 +32,5 @@ def application(environment, start_response):
 fn main() {
     pyo3::prepare_freethreaded_python();
     let rustgi = get_rustgi("0.0.0.0:8000");
-    rustgi.serve(None).unwrap();
+    rustgi.serve().unwrap();
 }

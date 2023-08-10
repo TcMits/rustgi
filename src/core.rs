@@ -18,7 +18,6 @@ use std::io::{self, Read, Write};
 use std::mem::MaybeUninit;
 use std::net::SocketAddr;
 use std::str::{from_utf8, FromStr};
-use std::sync::mpsc::{self, TryRecvError};
 use std::sync::Arc;
 
 const MAX_HEADERS: usize = 100;
@@ -65,7 +64,7 @@ impl Rustgi {
         self.inner.address.port()
     }
 
-    pub fn serve(&self, kill_signal: Option<mpsc::Receiver<()>>) -> Result<(), Error> {
+    pub fn serve(&self) -> Result<(), Error> {
         let mut connections = Slab::<Request>::with_capacity(1024);
         let mut events = Events::with_capacity(1024);
         let mut poll = Poll::new()?;
@@ -84,16 +83,6 @@ impl Rustgi {
         info!("$ nc {}", self.inner.address.to_string());
 
         loop {
-            if let Some(ref kill_signal) = kill_signal {
-                match kill_signal.try_recv() {
-                    Ok(_) | Err(TryRecvError::Disconnected) => {
-                        info!("Received kill signal, shutting down");
-                        return Ok(());
-                    }
-                    Err(TryRecvError::Empty) => {}
-                }
-            }
-
             if let Err(err) = poll.poll(&mut events, Some(std::time::Duration::from_secs(0))) {
                 if err.kind() == io::ErrorKind::Interrupted {
                     continue;

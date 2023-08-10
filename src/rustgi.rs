@@ -34,7 +34,7 @@ impl Default for RustgiConfig {
 fn serve(py: Python<'_>, app: PyObject, config: &RustgiConfig) -> PyResult<()> {
     py.allow_threads(|| -> Result<(), crate::error::Error> {
         let rustgi = crate::core::Rustgi::new(config.address.parse()?, app);
-        rustgi.serve(None)
+        rustgi.serve()
     })?;
 
     Ok(())
