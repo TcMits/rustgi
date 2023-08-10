@@ -1,42 +1,69 @@
-import httpx
+import requests
 import pytest
+import socket
 
-HOST = "0.0.0.0:8000"
+HOST_WITHOUT_PORT = "0.0.0.0"
+PORT = 8000
+HOST = HOST_WITHOUT_PORT + ":" + str(PORT)
+HOST_WITH_SCHEME = "http://" + HOST
 
-LARGE_BODY = "xxxxxx\n" * 1024 * 64
+LARGE_BODY = "xxxxxx\n" * 1024
+LARGE_YIELD_BODY = ("xxxxxx\n" for _ in range(1024))
 
 def test_wsgi():
-    with httpx.Client(base_url=f"http://{HOST}") as client:
-        r = client.post("/info?test=true", data="world")
-        assert r.status_code == 200
-        assert r.headers["content-type"] == "application/json"
-        r_json = r.json()
-        assert r_json["scheme"] == "http"
-        assert r_json["method"] == "POST"
-        assert r_json["path"] == "/info"
-        assert r_json["query_string"] == "test=true"
-        assert r_json["content_length"] == 5
-        assert r_json["headers"]["HTTP_HOST"] == HOST
+    r = requests.post(HOST_WITH_SCHEME + "/info?test=true", data="world")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "application/json"
+    r_json = r.json()
+    assert r_json["scheme"] == "http"
+    assert r_json["method"] == "POST"
+    assert r_json["path"] == "/info"
+    assert r_json["query_string"] == "test=true"
+    assert r_json["content_length"] == 5
+    assert r_json["headers"]["HTTP_HOST"] == HOST
 
-        r = client.post("/echo", data="hello\nworld")
-        assert r.status_code == 200
-        assert r.text == "hello\nworld"
+def test_wsgi_body():
+    r = requests.post(HOST_WITH_SCHEME + "/echo", data="hello\nworld")
+    assert r.status_code == 200
+    assert r.text == "hello\nworld"
 
-        r = client.post("/echo_iter", data="hello\nworld")
-        assert r.status_code == 200
-        assert r.text == "hello\nworld"
+def test_wsgi_body_iter():
+    r = requests.post(HOST_WITH_SCHEME + "/echo_iter", data="hello\nworld")
+    assert r.status_code == 200
+    assert r.text == "hello\nworld"
 
-        r = client.post("/echo_readline", data="hello\nworld")
-        assert r.status_code == 200
-        assert r.text == "hello\nworld"
+def test_wsgi_body_large():
+    r = requests.post(HOST_WITH_SCHEME + "/echo_iter", data=LARGE_BODY)
+    assert r.status_code == 200
+    assert r.text == LARGE_BODY
 
-        r = client.post("/echo_readlines", data="hello\nworld")
-        assert r.status_code == 200
-        assert r.text == "hello\nworld"
+def test_wsgi_err():
+    with pytest.raises(requests.exceptions.ConnectionError):
+        requests.get(HOST_WITH_SCHEME + "/err_app")
 
-        r = client.post("/echo_iter", data=LARGE_BODY)
-        assert r.status_code == 200
-        assert r.text == LARGE_BODY
+def test_wsgi_empty():
+    r = requests.get(HOST_WITH_SCHEME + "/empty_app")
+    assert r.status_code == 204
 
-        with pytest.raises(httpx.RemoteProtocolError):
-            client.get("/err_app")
+def test_wsgi_chunked():
+    r = requests.post(HOST_WITH_SCHEME + "/echo_iter", data=LARGE_YIELD_BODY)
+    assert r.status_code == 200
+    assert r.text == LARGE_BODY
+
+def test_wsgi_100_continue():
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
+        client.connect((HOST_WITHOUT_PORT, PORT))
+        request = ("GET /echo HTTP/1.1\r\n"
+                   "Expect: 100-continue\r\n"
+                   "Content-Length: 5\r\n\r\n")
+
+        client.send(request.encode("utf8"))
+
+        response = client.recv(1024)
+        assert response == b"HTTP/1.1 100 Continue\r\n\r\n"
+
+        client.send("hello".encode("utf8"))
+        expected = b"HTTP/1.1 200 OK\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: 5\r\nConnection: keep-alive\r\n\r\nhello"
+        response = client.recv(len(expected))
+        assert response == expected

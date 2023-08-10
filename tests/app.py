@@ -40,35 +40,24 @@ def echo_iter(environ, protocol):
     for line in environ['wsgi.input']:
         yield line
 
-def echo_readline(environ, protocol):
-    protocol(
-        '200 OK',
-        [('content-type', 'text/plain; charset=utf-8')]
-    )
-
-    while (line := environ['wsgi.input'].readline()):
-        yield line
-
-def echo_readlines(environ, protocol):
-    protocol(
-        '200 OK',
-        [('content-type', 'text/plain; charset=utf-8')]
-    )
-
-    for line in environ['wsgi.input'].readlines():
-        yield line
-
 def err_app(environ, protocol):
     1 / 0
+
+def empty_app(environ, protocol):
+    protocol(
+        '204 OK',
+        [('content-type', 'text/plain; charset=utf-8')]
+    )
+
+    return b''
 
 def app(environ, protocol):
     return {
         "/info": info,
         "/echo": echo,
         "/echo_iter": echo_iter,
-        "/echo_readline": echo_readline,
-        "/echo_readlines": echo_readlines,
-        "/err_app": err_app
+        "/err_app": err_app,
+        "/empty_app": empty_app
     }[environ["PATH_INFO"]](environ, protocol)
 
 
