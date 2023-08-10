@@ -4,23 +4,24 @@ use pyo3::{
     AsPyPointer, Py,
 };
 
-pub struct PyBytesBuf(Py<PyBytes>, usize);
+pub(crate) struct PyBytesBuf(Py<PyBytes>, usize);
 
 impl PyBytesBuf {
-    #[inline]
     pub fn new(b: Py<PyBytes>) -> Self {
         Self(b, 0)
     }
 }
 
-impl hyper::body::Buf for PyBytesBuf {
-    #[inline]
-    fn remaining(&self) -> usize {
+impl PyBytesBuf {
+    pub(crate) fn remaining(&self) -> usize {
         self.chunk().len()
     }
 
-    #[inline]
-    fn chunk(&self) -> &[u8] {
+    pub(crate) fn is_new(&self) -> bool {
+        self.1 == 0
+    }
+
+    pub(crate) fn chunk(&self) -> &[u8] {
         // safe because Python bytes are immutable, the result may be used for as long as the reference to
         let chunk: &[u8] = unsafe {
             let buffer = PyBytes_AsString(self.0.as_ptr()) as *const u8;
@@ -31,8 +32,7 @@ impl hyper::body::Buf for PyBytesBuf {
         &chunk[self.1..]
     }
 
-    #[inline]
-    fn advance(&mut self, cnt: usize) {
+    pub(crate) fn advance(&mut self, cnt: usize) {
         if cnt > self.remaining() {
             panic!("attempted to advance past the end of the buffer")
         }
