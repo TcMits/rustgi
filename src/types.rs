@@ -7,7 +7,7 @@ use pyo3::{
 pub(crate) struct PyBytesBuf(Py<PyBytes>, usize);
 
 impl PyBytesBuf {
-    pub fn new(b: Py<PyBytes>) -> Self {
+    pub(crate) fn new(b: Py<PyBytes>) -> Self {
         Self(b, 0)
     }
 }

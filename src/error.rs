@@ -8,9 +8,11 @@ pub enum Error {
     HTTPError(http::Error),
     InvalidUri(http::uri::InvalidUri),
     IOError(std::io::Error),
-    HTTPParseError(httparse::Error),
-    InvalidChunkSizeError(httparse::InvalidChunkSize),
     AddrParseError(std::net::AddrParseError),
+    UTF8Error(std::str::Utf8Error),
+    LLHTTPError(llhttp_rs::Error),
+    TLSError(rustls::Error),
+    HTTPResponseError(&'static [u8]),
 }
 
 impl From<PyErr> for Error {
@@ -37,21 +39,33 @@ impl From<std::io::Error> for Error {
     }
 }
 
-impl From<httparse::Error> for Error {
-    fn from(err: httparse::Error) -> Self {
-        Self::HTTPParseError(err)
-    }
-}
-
-impl From<httparse::InvalidChunkSize> for Error {
-    fn from(err: httparse::InvalidChunkSize) -> Self {
-        Self::InvalidChunkSizeError(err)
-    }
-}
-
 impl From<std::net::AddrParseError> for Error {
     fn from(err: std::net::AddrParseError) -> Self {
         Self::AddrParseError(err)
+    }
+}
+
+impl From<std::str::Utf8Error> for Error {
+    fn from(err: std::str::Utf8Error) -> Self {
+        Self::UTF8Error(err)
+    }
+}
+
+impl From<llhttp_rs::Error> for Error {
+    fn from(err: llhttp_rs::Error) -> Self {
+        Self::LLHTTPError(err)
+    }
+}
+
+impl From<rustls::Error> for Error {
+    fn from(err: rustls::Error) -> Self {
+        Self::TLSError(err)
+    }
+}
+
+impl From<&'static [u8]> for Error {
+    fn from(err: &'static [u8]) -> Self {
+        Self::HTTPResponseError(err)
     }
 }
 
@@ -62,9 +76,11 @@ impl std::fmt::Display for Error {
             Self::HTTPError(err) => write!(f, "HTTPError: {}", err),
             Self::InvalidUri(err) => write!(f, "InvalidUri: {}", err),
             Self::IOError(err) => write!(f, "IOError: {}", err),
-            Self::HTTPParseError(err) => write!(f, "HTTPParseError: {}", err),
-            Self::InvalidChunkSizeError(err) => write!(f, "InvalidChunkSizeError: {}", err),
             Self::AddrParseError(err) => write!(f, "AddrParseError: {}", err),
+            Self::UTF8Error(err) => write!(f, "UTF8Error: {}", err),
+            Self::LLHTTPError(err) => write!(f, "LLHTTPError: {}", err),
+            Self::TLSError(err) => write!(f, "TLSError: {}", err),
+            Self::HTTPResponseError(err) => write!(f, "HTTPResponseError: {:?}", err),
         }
     }
 }
@@ -76,9 +92,11 @@ impl std::error::Error for Error {
             Self::HTTPError(err) => Some(err),
             Self::InvalidUri(err) => Some(err),
             Self::IOError(err) => Some(err),
-            Self::HTTPParseError(err) => Some(err),
-            Self::InvalidChunkSizeError(_) => None,
             Self::AddrParseError(err) => Some(err),
+            Self::UTF8Error(err) => Some(err),
+            Self::LLHTTPError(err) => Some(err),
+            Self::TLSError(err) => Some(err),
+            Self::HTTPResponseError(_) => None,
         }
     }
 }
@@ -93,15 +111,21 @@ impl From<Error> for PyErr {
             Error::InvalidUri(err) => {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{}", err))
             }
-            Error::IOError(err) => PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", err)),
-            Error::HTTPParseError(err) => {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{}", err))
-            }
-            Error::InvalidChunkSizeError(err) => {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{}", err))
-            }
+            Error::IOError(err) => err.into(),
             Error::AddrParseError(err) => {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{}", err))
+            }
+            Error::UTF8Error(err) => {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{}", err))
+            }
+            Error::LLHTTPError(err) => {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{}", err))
+            }
+            Error::TLSError(err) => {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{}", err))
+            }
+            Error::HTTPResponseError(err) => {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{:?}", err))
             }
         }
     }

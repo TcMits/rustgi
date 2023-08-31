@@ -1,6 +1,7 @@
 import json
 import logging
 import rustgi
+import os
 
 
 FORMAT = '%(levelname)s %(name)s %(asctime)-15s %(filename)s:%(lineno)d %(message)s'
@@ -57,8 +58,15 @@ def app(environ, protocol):
         "/echo": echo,
         "/echo_iter": echo_iter,
         "/err_app": err_app,
-        "/empty_app": empty_app
+        "/empty_app": empty_app,
+        "/": echo,
+        "": echo,
     }[environ["PATH_INFO"]](environ, protocol)
 
 
-rustgi.serve(app, rustgi.RustgiConfig())
+rustgi.serve(
+    app,
+    rustgi.RustgiConfig()
+        .set_address("0.0.0.0:8000")
+        .set_max_body_size(1024 * 66 * 7)
+)

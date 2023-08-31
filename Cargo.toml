@@ -15,11 +15,13 @@ pyo3 = "0.19.0"
 pyo3-log = { version = "0.8.1"}
 log = { version = "0.4.17" }
 mio = { version = "0.8.8", features = ["net", "os-poll"] }
-httparse = "1.8.0"
 bytes = "1.4.0"
 http-body = "0.4.5"
 mio-signals = "0.2.0"
 slab = "0.4.8"
+llhttp_rs = { git = "https://github.com/TcMits/llhttp-rs.git", version = "0.1.0" }
+rustls = "0.21.6"
+rustls-pemfile = "1.0.3"
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 jemallocator = { version = "0.5", features = ["disable_initial_exec_tls"], optional = true }
@@ -34,5 +36,5 @@ python = ["dep:jemallocator", "pyo3/extension-module"]
 lto = true
 opt-level = 3
 strip = true
-debug = false
 codegen-units = 1
+debug = true
