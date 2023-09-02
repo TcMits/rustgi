@@ -10,6 +10,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 // Setup some tokens to allow us to identify which event is for which socket.
 const SERVER: Token = Token(usize::MAX);
@@ -90,7 +91,7 @@ impl Rustgi {
         info!("$ nc {}", self.inner.address.to_string());
 
         loop {
-            if let Err(err) = poll.poll(&mut events, None) {
+            if let Err(err) = poll.poll(&mut events, Some(Duration::from_millis(10))) {
                 if err.kind() == io::ErrorKind::Interrupted {
                     continue;
                 }
