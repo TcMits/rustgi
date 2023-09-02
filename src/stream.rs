@@ -7,6 +7,15 @@ pub(crate) enum Stream {
     Ssl(rustls::StreamOwned<rustls::ServerConnection, TcpStream>),
 }
 
+impl Stream {
+    pub(crate) fn remote_addr(&self) -> Result<std::net::SocketAddr> {
+        match self {
+            Self::Tcp(stream) => stream.peer_addr(),
+            Self::Ssl(stream) => stream.get_ref().peer_addr(),
+        }
+    }
+}
+
 impl Read for Stream {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         match self {

@@ -35,9 +35,8 @@ lazy_static! {
 
 struct RequestParserContext<'a> {
     rustgi: Rustgi,
-    data: &'a [u8],
     environ: &'a PyDict,
-    header_field: (usize, usize),
+    header_field: String,
     expect_continue: bool,
     complete: bool,
     error: Option<Error>,
@@ -116,31 +115,7 @@ impl llhttp_rs::Callbacks for RequestParserContext<'_> {
         _: &mut llhttp_rs::Parser,
         header_field: &[u8],
     ) -> llhttp_rs::ParserResult<()> {
-        self.header_field = (
-            header_field.as_ptr() as usize - self.data.as_ptr() as usize,
-            header_field.len(),
-        );
-
-        Ok(())
-    }
-
-    fn on_header_value(
-        &mut self,
-        _: &mut llhttp_rs::Parser,
-        header_value: &[u8],
-    ) -> llhttp_rs::ParserResult<()> {
-        let py = self.environ.py();
-        let header_field =
-            &self.data[self.header_field.0..self.header_field.0 + self.header_field.1];
-
-        let value = self.parser_result(from_utf8(header_value))?;
-        if header_field.eq_ignore_ascii_case(b"content-length") {
-            return self.parser_result(self.environ.set_item(intern!(py, "CONTENT_LENGTH"), value));
-        } else if header_field.eq_ignore_ascii_case(b"content-type") {
-            return self.parser_result(self.environ.set_item(intern!(py, "CONTENT_TYPE"), value));
-        }
-
-        let header_field: String = "HTTP_".to_owned()
+        self.header_field = "HTTP_".to_owned()
             + &self
                 .parser_result(from_utf8(header_field))?
                 .chars()
@@ -153,7 +128,27 @@ impl llhttp_rs::Callbacks for RequestParserContext<'_> {
                 })
                 .collect::<String>();
 
-        self.parser_result(self.environ.set_item(header_field, value))
+        Ok(())
+    }
+
+    fn on_header_value(
+        &mut self,
+        _: &mut llhttp_rs::Parser,
+        header_value: &[u8],
+    ) -> llhttp_rs::ParserResult<()> {
+        let py = self.environ.py();
+        let value = self.parser_result(from_utf8(header_value))?;
+
+        if self
+            .header_field
+            .eq_ignore_ascii_case("HTTP_CONTENT_LENGTH")
+        {
+            return self.parser_result(self.environ.set_item(intern!(py, "CONTENT_LENGTH"), value));
+        } else if self.header_field.eq_ignore_ascii_case("HTTP_CONTENT_TYPE") {
+            return self.parser_result(self.environ.set_item(intern!(py, "CONTENT_TYPE"), value));
+        }
+
+        self.parser_result(self.environ.set_item(&self.header_field, value))
     }
 
     fn on_headers_complete(&mut self, _: &mut llhttp_rs::Parser) -> llhttp_rs::ParserResult<()> {
@@ -271,6 +266,7 @@ impl Request {
         }
 
         let environ = PyDict::new(py);
+        let remote_addr = self.stream.remote_addr()?;
         environ.set_item(intern!(py, "SCRIPT_NAME"), intern!(py, ""))?;
         environ.set_item(intern!(environ.py(), "SERVER_NAME"), self.rustgi.get_host())?;
         environ.set_item(intern!(environ.py(), "SERVER_PORT"), self.rustgi.get_port())?;
@@ -288,6 +284,11 @@ impl Request {
         environ.set_item(intern!(environ.py(), "wsgi.multiprocess"), true)?;
         environ.set_item(intern!(environ.py(), "wsgi.run_once"), false)?;
         environ.set_item(intern!(environ.py(), "wsgi.input"), PY_BYTES_IO.call0(py)?)?;
+        environ.set_item(
+            intern!(environ.py(), "REMOTE_ADDR"),
+            remote_addr.ip().to_string(),
+        )?;
+        environ.set_item(intern!(environ.py(), "REMOTE_PORT"), remote_addr.port())?;
 
         self.environ.replace(environ.into());
 
@@ -355,8 +356,7 @@ impl Request {
             let mut context = RequestParserContext {
                 rustgi: self.rustgi.clone(),
                 environ,
-                data: unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, 0) },
-                header_field: (0, 0),
+                header_field: "".to_owned(),
                 expect_continue: false,
                 complete: false,
                 error: None,
@@ -377,7 +377,6 @@ impl Request {
                         let read_buffer =
                             unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, n) };
 
-                        context.data = read_buffer;
                         match self.parser.parse(&mut context, read_buffer) {
                             Err(err) if context.error.is_none() => {
                                 context.error.replace(err.into());
