@@ -201,7 +201,7 @@ enum RequestState {
     Handshake,
     Parse,
     ErrorResponse(&'static [u8], bool),
-    Response(BytesMut, WSGIResponseBody, bool),
+    Response(BytesMut, WSGIResponseBody, bool, bool),
 }
 
 pub(crate) struct Request {
@@ -295,7 +295,10 @@ impl Request {
         Ok(())
     }
 
-    fn get_response(&mut self, py: Python<'_>) -> Result<(BytesMut, WSGIResponseBody), Error> {
+    fn get_response(
+        &mut self,
+        py: Python<'_>,
+    ) -> Result<(BytesMut, WSGIResponseBody, bool), Error> {
         let mut buffer = BytesMut::with_capacity(REPONSE_HEADER_SIZE);
         let mut is_http_11 = false;
         match self.parser.get_version().unwrap_or(http::Version::HTTP_11) {
@@ -343,7 +346,7 @@ impl Request {
         }
         buffer.extend_from_slice(b"\r\n");
 
-        Ok((buffer, body))
+        Ok((buffer, body, chunked_response))
     }
 
     fn on_read_or_handshake(&mut self, registry: &Registry, event: &Event) -> Result<bool, Error> {
@@ -415,8 +418,8 @@ impl Request {
             } else if context.expect_continue {
                 self.state = RequestState::ErrorResponse(RESPONSE_CONTINUE, true);
             } else {
-                let (buffer, body) = self.get_response(py)?;
-                self.state = RequestState::Response(buffer, body, false);
+                let (buffer, body, chunked_response) = self.get_response(py)?;
+                self.state = RequestState::Response(buffer, body, chunked_response, false);
             }
 
             Ok(true)
@@ -450,10 +453,13 @@ impl Request {
 
     fn on_write_response(&mut self, registry: &Registry, event: &Event) -> Result<bool, Error> {
         Python::with_gil(|py| -> Result<bool, Error> {
-            if let RequestState::Response(ref mut buffer, ref mut body, ref mut chunking) =
-                self.state
+            if let RequestState::Response(
+                ref mut buffer,
+                ref mut body,
+                chunked_response,
+                ref mut chunking,
+            ) = self.state
             {
-                let chunked_response = body.size_hint().exact().is_none();
                 let keep_alive = self.parser.should_keep_alive()
                     && (!chunked_response
                         || matches!(
