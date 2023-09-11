@@ -367,7 +367,7 @@ impl Request {
             let read_buffer = unsafe {
                 std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut u8, READ_BUFFER_SIZE)
             };
-            let handshaking = !matches!(self.state, RequestState::Handshake);
+            let handshaking = matches!(self.state, RequestState::Handshake);
             let mut finished_handshake = !handshaking;
 
             while !context.complete && context.error.is_none() {
