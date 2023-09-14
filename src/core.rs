@@ -65,10 +65,7 @@ impl Rustgi {
             .enable_io()
             .build()?;
         let local = tokio::task::LocalSet::new();
-        let acceptor = match self.get_tls_config() {
-            Some(config) => Some(TlsAcceptor::from(config)),
-            None => None,
-        };
+        let acceptor = self.get_tls_config().map(TlsAcceptor::from);
 
         info!("You can connect to the server using `nc`:");
         info!("$ nc {}", self.inner.address.to_string());

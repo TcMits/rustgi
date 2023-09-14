@@ -373,7 +373,7 @@ impl Request {
             };
         }
 
-        return Ok(());
+        Ok(())
     }
 
     async fn on_error_response(&mut self) -> Result<(), Error> {
