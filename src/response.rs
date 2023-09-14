@@ -1,6 +1,6 @@
 use crate::error::Error;
 use crate::types::PyBytesBuf;
-use bytes::BytesMut;
+use bytes::{Buf, BytesMut};
 use http::StatusCode;
 use pyo3::exceptions::PyValueError;
 use pyo3::ffi::{PyBytes_Check, PyList_Check, PyList_Size};
@@ -8,34 +8,25 @@ use pyo3::types::{PyIterator, PyTuple};
 use pyo3::{prelude::*, AsPyPointer};
 use pyo3::{Py, PyObject};
 use std::str::FromStr;
-use std::sync::{Arc, Weak};
 
-pub(crate) struct WSGIResponseConfig {
+struct WSGIResponseConfig {
     head_bytes: BytesMut,
     content_length: Option<u64>,
 }
 
-impl WSGIResponseConfig {
-    pub(crate) fn new(initial_bytes: BytesMut) -> Self {
-        Self {
-            head_bytes: initial_bytes,
-            content_length: None,
-        }
-    }
-
-    pub(crate) fn into_bytes(self) -> BytesMut {
-        self.head_bytes
-    }
-}
-
 #[pyclass]
 pub(crate) struct WSGIStartResponse {
-    config: Weak<WSGIResponseConfig>,
+    config: WSGIResponseConfig,
 }
 
 impl WSGIStartResponse {
-    pub(crate) fn new(config: Weak<WSGIResponseConfig>) -> Self {
-        Self { config }
+    pub(crate) fn new(initial_bytes: BytesMut) -> Self {
+        Self {
+            config: WSGIResponseConfig {
+                head_bytes: initial_bytes,
+                content_length: None,
+            },
+        }
     }
 }
 
@@ -43,13 +34,14 @@ impl WSGIStartResponse {
 impl WSGIStartResponse {
     #[pyo3(signature = (status, headers, exc_info=None))]
     fn __call__(
-        &self,
+        &self, // it will raise borrow checker error if we use &mut self
         status: &str,
         headers: Vec<(&str, &str)>,
         exc_info: Option<&PyTuple>,
     ) -> PyResult<()> {
         let _ = exc_info;
-        let this = unsafe { &mut *(self.config.as_ptr() as *mut WSGIResponseConfig) };
+        let this =
+            unsafe { &mut *(&self.config as *const WSGIResponseConfig as *mut WSGIResponseConfig) };
 
         let status_pair = status
             .split_once(' ')
@@ -86,23 +78,23 @@ impl WSGIStartResponse {
 }
 
 impl WSGIStartResponse {
-    pub(crate) fn take_body_builder(&self, wsgi_iter: PyObject) -> WSGIResponseBodyBuilder {
-        WSGIResponseBodyBuilder::new(self.config.upgrade(), wsgi_iter)
+    pub(crate) fn take_body_builder(&mut self, wsgi_iter: PyObject) -> WSGIResponseBuilder {
+        WSGIResponseBuilder::new(&mut self.config as *mut _, wsgi_iter)
     }
 }
 
 /// WSGI response builder.
-pub(crate) struct WSGIResponseBodyBuilder {
-    config: Option<Arc<WSGIResponseConfig>>,
+pub(crate) struct WSGIResponseBuilder {
+    config: *mut WSGIResponseConfig,
     wsgi_iter: PyObject,
 }
 
-impl WSGIResponseBodyBuilder {
-    fn new(config: Option<Arc<WSGIResponseConfig>>, wsgi_iter: PyObject) -> Self {
+impl WSGIResponseBuilder {
+    fn new(config: *mut WSGIResponseConfig, wsgi_iter: PyObject) -> Self {
         Self { config, wsgi_iter }
     }
 
-    pub(crate) fn build(self, py: Python<'_>) -> Result<WSGIResponseBody, Error> {
+    pub(crate) fn build(self, py: Python<'_>) -> Result<(BytesMut, WSGIResponseBody), Error> {
         let mut wsgi_iter = self.wsgi_iter;
 
         // optimize for the common case of a single string
@@ -128,24 +120,25 @@ impl WSGIResponseBodyBuilder {
             }
         };
 
-        body.set_content_length(match self.config {
-            Some(config) => config.content_length,
-            None => None,
-        });
-        Ok(body)
+        let config = unsafe { &mut *self.config };
+        body.set_content_length(config.content_length);
+        Ok((config.head_bytes.split(), body))
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct WSGIResponseBody {
     current_chunk: Option<PyBytesBuf>,
+    next_chunk: Option<PyBytesBuf>,
     wsgi_iter: Option<Py<PyIterator>>,
     content_length: Option<u64>,
 }
 
 impl WSGIResponseBody {
-    fn new(current_chunk: Option<PyBytesBuf>, wsgi_iter: Option<Py<PyIterator>>) -> Self {
+    fn new(next_chunk: Option<PyBytesBuf>, wsgi_iter: Option<Py<PyIterator>>) -> Self {
         Self {
-            current_chunk,
+            current_chunk: None,
+            next_chunk,
             wsgi_iter,
             content_length: None,
         }
@@ -154,6 +147,7 @@ impl WSGIResponseBody {
     fn empty() -> Self {
         Self {
             current_chunk: None,
+            next_chunk: None,
             wsgi_iter: None,
             content_length: Some(0),
         }
@@ -167,23 +161,21 @@ impl WSGIResponseBody {
         self.current_chunk.take()
     }
 
-    pub(crate) fn set_current_chunk(&mut self, chunk: PyBytesBuf) {
-        self.current_chunk.replace(chunk);
-    }
-
     pub(crate) fn poll_from_iter(&mut self, py: Python<'_>) -> Result<(), Error> {
-        if self.current_chunk.is_none() {
-            if let Some(ref iter) = self.wsgi_iter {
-                let mut iter = iter.as_ref(py);
-                if let Some(next_chunk) = iter.next() {
-                    self.current_chunk
-                        .replace(PyBytesBuf::new(next_chunk?.extract()?));
-                }
+        if self.current_chunk.is_some() {
+            return Ok(());
+        }
+
+        self.current_chunk = self.next_chunk.take();
+        if let Some(ref iter) = self.wsgi_iter {
+            let mut iter = iter.as_ref(py);
+            if let Some(next_chunk) = iter.next() {
+                self.next_chunk
+                    .replace(PyBytesBuf::new(next_chunk?.extract()?));
             }
         }
 
-        // If the current chunk is still None, there is no more data
-        if self.current_chunk.is_none() {
+        if self.next_chunk.is_none() {
             self.wsgi_iter = None
         }
 
@@ -191,7 +183,7 @@ impl WSGIResponseBody {
     }
 
     pub(crate) fn is_end_stream(&self) -> bool {
-        self.current_chunk.is_none() && self.wsgi_iter.is_none()
+        self.current_chunk.is_none() && self.next_chunk.is_none()
     }
 
     pub(crate) fn size_hint(&self) -> http_body::SizeHint {
@@ -203,12 +195,14 @@ impl WSGIResponseBody {
             return sh;
         }
 
-        // If the current chunk is Some, we can use it's size as the lower bound
         if let Some(ref chunk) = self.current_chunk {
-            sh.set_lower(chunk.remaining() as u64);
+            sh.set_lower(chunk.chunk().remaining() as u64);
         }
 
-        // If the iterator is None, we are done
+        if let Some(ref chunk) = self.next_chunk {
+            sh.set_lower(sh.lower() + chunk.chunk().remaining() as u64);
+        }
+
         if self.wsgi_iter.is_none() {
             sh.set_upper(sh.lower());
         }

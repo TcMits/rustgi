@@ -2,6 +2,12 @@
 
 rustgi is a fast, lightweight, single-thread Web Server Gateway Interface (WSGI) that allows you to run Python web applications using Rust. It provides a high-performance and efficient environment for hosting WSGI-compatible applications.
 
+## Features
+
+- serve WSGI
+- set max body size
+- tls
+
 ## Getting Started
 
 ### Prerequisites

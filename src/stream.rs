@@ -1,82 +1,40 @@
-use std::io::{Read, Result, Write};
+use std::io::Result;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use mio::{event::Source, net::TcpStream};
+use tokio::net::TcpStream;
+use tokio_rustls::server::TlsStream;
 
 pub(crate) enum Stream {
     Tcp(TcpStream),
-    Ssl(rustls::StreamOwned<rustls::ServerConnection, TcpStream>),
+    Tls(TlsStream<TcpStream>),
 }
 
 impl Stream {
     pub(crate) fn remote_addr(&self) -> Result<std::net::SocketAddr> {
         match self {
             Self::Tcp(stream) => stream.peer_addr(),
-            Self::Ssl(stream) => stream.get_ref().peer_addr(),
-        }
-    }
-}
-
-impl Read for Stream {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        match self {
-            Self::Tcp(stream) => stream.read(buf),
-            Self::Ssl(stream) => stream.read(buf),
-        }
-    }
-}
-
-impl Write for Stream {
-    fn write(&mut self, buf: &[u8]) -> Result<usize> {
-        match self {
-            Self::Tcp(stream) => stream.write(buf),
-            Self::Ssl(stream) => stream.write(buf),
+            Self::Tls(stream) => stream.get_ref().0.peer_addr(),
         }
     }
 
-    fn write_vectored(&mut self, bufs: &[std::io::IoSlice<'_>]) -> Result<usize> {
+    pub(crate) async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         match self {
-            Self::Tcp(stream) => stream.write_vectored(bufs),
-            Self::Ssl(stream) => stream.write_vectored(bufs),
+            Self::Tcp(stream) => stream.read(buf).await,
+            Self::Tls(stream) => stream.read(buf).await,
         }
     }
 
-    fn flush(&mut self) -> Result<()> {
+    pub(crate) async fn write(&mut self, buf: &[u8]) -> Result<usize> {
         match self {
-            Self::Tcp(stream) => stream.flush(),
-            Self::Ssl(stream) => stream.flush(),
-        }
-    }
-}
-
-impl Source for Stream {
-    fn register(
-        &mut self,
-        registry: &mio::Registry,
-        token: mio::Token,
-        interests: mio::Interest,
-    ) -> std::io::Result<()> {
-        match self {
-            Self::Tcp(stream) => stream.register(registry, token, interests),
-            Self::Ssl(stream) => stream.get_mut().register(registry, token, interests),
+            Self::Tcp(stream) => stream.write(buf).await,
+            Self::Tls(stream) => stream.write(buf).await,
         }
     }
 
-    fn reregister(
-        &mut self,
-        registry: &mio::Registry,
-        token: mio::Token,
-        interests: mio::Interest,
-    ) -> std::io::Result<()> {
+    pub(crate) async fn write_vectored(&mut self, bufs: &[std::io::IoSlice<'_>]) -> Result<usize> {
         match self {
-            Self::Tcp(stream) => stream.reregister(registry, token, interests),
-            Self::Ssl(stream) => stream.get_mut().reregister(registry, token, interests),
-        }
-    }
-
-    fn deregister(&mut self, registry: &mio::Registry) -> std::io::Result<()> {
-        match self {
-            Self::Tcp(stream) => stream.deregister(registry),
-            Self::Ssl(stream) => stream.get_mut().deregister(registry),
+            Self::Tcp(stream) => stream.write_vectored(bufs).await,
+            Self::Tls(stream) => stream.write_vectored(bufs).await,
         }
     }
 }
@@ -87,8 +45,8 @@ impl From<TcpStream> for Stream {
     }
 }
 
-impl From<rustls::StreamOwned<rustls::ServerConnection, TcpStream>> for Stream {
-    fn from(stream: rustls::StreamOwned<rustls::ServerConnection, TcpStream>) -> Self {
-        Self::Ssl(stream)
+impl From<TlsStream<TcpStream>> for Stream {
+    fn from(stream: TlsStream<TcpStream>) -> Self {
+        Self::Tls(stream)
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "rustgi"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -14,27 +14,26 @@ lazy_static = "1.4.0"
 pyo3 = "0.19.0"
 pyo3-log = { version = "0.8.1"}
 log = { version = "0.4.17" }
-mio = { version = "0.8.8", features = ["net", "os-poll"] }
 bytes = "1.4.0"
 http-body = "0.4.5"
-mio-signals = "0.2.0"
-slab = "0.4.8"
 llhttp_rs = { git = "https://github.com/TcMits/llhttp-rs.git", version = "0.1.0" }
 rustls = "0.21.6"
 rustls-pemfile = "1.0.3"
-
-[target.'cfg(not(target_env = "msvc"))'.dependencies]
-jemallocator = { version = "0.5", features = ["disable_initial_exec_tls"], optional = true }
+tokio = { version = "1.32.0", features = ["net", "signal", "rt", "macros", "io-util"] }
+tokio-rustls = "0.24.1"
 
 [dev-dependencies]
 rustgi = { path = ".", features = ["python"] }
 
 [features]
-python = ["dep:jemallocator", "pyo3/extension-module"]
+python = ["pyo3/extension-module"]
 
 [profile.release]
 lto = true
 opt-level = 3
 strip = true
 codegen-units = 1
+debug = false
+
+[profile.dev]
 debug = true

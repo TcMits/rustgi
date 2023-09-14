@@ -1,22 +1,18 @@
 use crate::core::Rustgi;
 use crate::error::Error;
-use crate::response::{WSGIResponseBody, WSGIResponseConfig, WSGIStartResponse};
+use crate::response::{WSGIResponseBody, WSGIStartResponse};
 use crate::stream::Stream;
 use bytes::{Buf, BytesMut};
 use http::Uri;
 use lazy_static::lazy_static;
 use log::debug;
-use mio::event::Event;
-use mio::net::TcpStream;
-use mio::{Interest, Registry, Token};
 use pyo3::ffi::{PyDict_SetItemString, PySys_GetObject};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pyo3::{intern, AsPyPointer};
-use std::io::{self, Read, Write};
+use std::io::{self, IoSlice};
 use std::mem::MaybeUninit;
 use std::str::from_utf8;
-use std::sync::Arc;
 
 const RESPONSE_CONTINUE: &[u8] = b"HTTP/1.1 100 Continue\r\n\r\n";
 const RESPONSE_BAD_REQUEST: &[u8] = b"HTTP/1.1 400 Bad Request\r\n\r\n";
@@ -197,74 +193,39 @@ impl llhttp_rs::Callbacks for RequestParserContext<'_> {
     }
 }
 
+#[derive(Debug)]
 enum RequestState {
-    Handshake,
-    Parse,
-    ErrorResponse(&'static [u8], bool),
-    Response(BytesMut, WSGIResponseBody, bool, bool),
+    Parse(Option<Py<PyDict>>),
+    ErrorResponse(&'static [u8], Option<Py<PyDict>>),
+    Response(BytesMut, WSGIResponseBody),
+    Finished,
 }
 
 pub(crate) struct Request {
     rustgi: Rustgi,
     stream: Stream,
     parser: llhttp_rs::Parser,
-    environ: Option<Py<PyDict>>,
     state: RequestState,
 }
 
 impl Request {
-    pub(crate) fn new(
-        rustgi: Rustgi,
-        stream: TcpStream,
-        registry: &Registry,
-        token: Token,
-    ) -> Result<Self, Error> {
-        let interests = Interest::READABLE;
-        let mut state = RequestState::Parse;
-
-        let stream = if rustgi.is_tls_enabled() {
-            interests.add(Interest::WRITABLE);
-            state = RequestState::Handshake;
-            rustls::StreamOwned::new(
-                rustls::ServerConnection::new(rustgi.get_tls_config().unwrap())?,
-                stream,
-            )
-            .into()
-        } else {
-            stream.into()
-        };
-
-        let mut this = Self {
+    pub(crate) fn new(rustgi: Rustgi, stream: Stream) -> Self {
+        Self {
             rustgi,
             stream,
             parser: llhttp_rs::Parser::request(),
-            environ: None,
-            state,
-        };
-
-        registry.register(&mut this.stream, token, interests)?;
-        Ok(this)
-    }
-
-    fn reset(&mut self, registry: &Registry, event: &Event) -> Result<(), Error> {
-        self.parser = llhttp_rs::Parser::request();
-        self.environ = None;
-        self.state = RequestState::Parse;
-
-        registry.reregister(&mut self.stream, event.token(), Interest::READABLE)?;
-        Ok(())
-    }
-
-    pub(crate) fn clean(&mut self, registry: &Registry) -> Result<(), Error> {
-        registry.deregister(&mut self.stream)?;
-        Ok(())
-    }
-
-    fn ensure_environ(&mut self, py: Python<'_>) -> Result<(), Error> {
-        if self.environ.is_some() {
-            return Ok(());
+            state: RequestState::Parse(None),
         }
+    }
 
+    fn reset(&mut self) -> Result<(), Error> {
+        self.parser = llhttp_rs::Parser::request();
+        self.state = RequestState::Parse(None);
+
+        Ok(())
+    }
+
+    fn get_environ<'p>(&self, py: Python<'p>) -> Result<&'p PyDict, Error> {
         let environ = PyDict::new(py);
         let remote_addr = self.stream.remote_addr()?;
         environ.set_item(intern!(py, "SCRIPT_NAME"), intern!(py, ""))?;
@@ -290,15 +251,11 @@ impl Request {
         )?;
         environ.set_item(intern!(environ.py(), "REMOTE_PORT"), remote_addr.port())?;
 
-        self.environ.replace(environ.into());
-
-        Ok(())
+        Ok(environ)
     }
 
-    fn get_response(
-        &mut self,
-        py: Python<'_>,
-    ) -> Result<(BytesMut, WSGIResponseBody, bool), Error> {
+    fn get_response(&self, environ: &PyDict) -> Result<(BytesMut, WSGIResponseBody), Error> {
+        let py = environ.py();
         let mut buffer = BytesMut::with_capacity(REPONSE_HEADER_SIZE);
         let mut is_http_11 = false;
         match self.parser.get_version().unwrap_or(http::Version::HTTP_11) {
@@ -308,25 +265,23 @@ impl Request {
             }
             _ => buffer.extend_from_slice(b"HTTP/1.0 "),
         };
-        let config = Arc::new(WSGIResponseConfig::new(buffer));
 
         let builder = {
             let pool = unsafe { py.new_pool() };
             let py = pool.python();
-            let wsgi_response_config =
-                Py::new(py, WSGIStartResponse::new(Arc::downgrade(&config)))?;
+            let wsgi_response_config = Py::new(py, WSGIStartResponse::new(buffer))?;
 
             let wsgi_iter = self
                 .rustgi
                 .get_wsgi_app()
-                .call1(py, (self.environ.take().unwrap(), &wsgi_response_config))?;
+                .call1(py, (environ, &wsgi_response_config))?;
 
-            let config = wsgi_response_config.as_ref(py).borrow_mut();
+            let mut config = wsgi_response_config.as_ref(py).borrow_mut();
             config.take_body_builder(wsgi_iter)
         };
 
-        let body = builder.build(py)?; // trigger start_response
-        let mut buffer = Arc::into_inner(config).unwrap().into_bytes();
+        let (mut buffer, body) = builder.build(py)?; // trigger start_response
+
         let exact_content_length = body.size_hint().exact();
         let chunked_response = exact_content_length.is_none();
         let keep_alive = self.parser.should_keep_alive() && (!chunked_response || is_http_11);
@@ -346,227 +301,229 @@ impl Request {
         }
         buffer.extend_from_slice(b"\r\n");
 
-        Ok((buffer, body, chunked_response))
+        Ok((buffer, body))
     }
 
-    fn on_read_or_handshake(&mut self, registry: &Registry, event: &Event) -> Result<bool, Error> {
-        Python::with_gil(|py| -> Result<bool, Error> {
-            self.ensure_environ(py)?;
+    async fn on_parse(&mut self) -> Result<(), Error> {
+        let mut data: [MaybeUninit<u8>; READ_BUFFER_SIZE] =
+            unsafe { MaybeUninit::uninit().assume_init() };
+        let read_buffer = unsafe {
+            std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut u8, READ_BUFFER_SIZE)
+        };
 
-            let environ = self.environ.as_ref().unwrap().as_ref(py);
-            let mut data: [MaybeUninit<u8>; READ_BUFFER_SIZE] =
-                unsafe { MaybeUninit::uninit().assume_init() };
-            let mut context = RequestParserContext {
-                rustgi: self.rustgi.clone(),
-                environ,
-                header_field: "".to_owned(),
-                expect_continue: false,
-                complete: false,
-                error: None,
-            };
-            let read_buffer = unsafe {
-                std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut u8, READ_BUFFER_SIZE)
-            };
-            let handshaking = matches!(self.state, RequestState::Handshake);
-            let mut finished_handshake = !handshaking;
+        while matches!(self.state, RequestState::Parse(..)) {
+            match self.stream.read(read_buffer).await {
+                Ok(n) if n == 0 => {
+                    self.state = RequestState::Finished;
+                    return Ok(());
+                }
+                Ok(n) => {
+                    let read_buffer =
+                        unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, n) };
 
-            while !context.complete && context.error.is_none() {
-                match self.stream.read(read_buffer) {
-                    Ok(n) if n == 0 => {
-                        return Ok(false);
-                    }
-                    Ok(n) => {
-                        finished_handshake = true;
-                        let read_buffer =
-                            unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, n) };
+                    Python::with_gil(|py| -> Result<(), Error> {
+                        let environ = match self.state {
+                            RequestState::Parse(Some(ref environ)) => environ.as_ref(py),
+                            RequestState::Parse(None) => {
+                                let environ = self.get_environ(py)?;
+                                self.state = RequestState::Parse(Some(environ.into()));
+                                environ
+                            }
+                            _ => unreachable!(),
+                        };
 
-                        match self.parser.parse(&mut context, read_buffer) {
-                            Err(err) if context.error.is_none() => {
+                        let mut context = RequestParserContext {
+                            rustgi: self.rustgi.clone(),
+                            environ,
+                            header_field: "".to_owned(),
+                            expect_continue: false,
+                            complete: false,
+                            error: None,
+                        };
+
+                        if let Err(err) = self.parser.parse(&mut context, read_buffer) {
+                            if context.error.is_none() {
                                 context.error.replace(err.into());
                             }
-                            _ => {}
-                        }
-                    }
-                    Err(ref err)
-                        if err.kind() == io::ErrorKind::WouldBlock && context.expect_continue =>
-                    {
-                        break
-                    }
-                    Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
-                        if handshaking && finished_handshake {
-                            self.state = RequestState::Parse;
-                            registry.reregister(
-                                &mut self.stream,
-                                event.token(),
-                                Interest::READABLE,
-                            )?;
+                        };
+
+                        if let Some(Error::HTTPResponseError(response)) = context.error {
+                            self.state = RequestState::ErrorResponse(response, None);
+                        } else if context.error.is_some() {
+                            debug!("Error parsing request: {:?}", context.error);
+                            self.state = RequestState::ErrorResponse(RESPONSE_BAD_REQUEST, None);
+                        } else if context.expect_continue {
+                            self.state = RequestState::ErrorResponse(
+                                RESPONSE_CONTINUE,
+                                Some(environ.into()),
+                            );
+                        } else if context.complete {
+                            let (buffer, body) = self.get_response(environ)?;
+                            self.state = RequestState::Response(buffer, body);
                         }
 
-                        return Ok(true);
-                    }
-                    Err(ref err) if err.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(e) => return Err(e.into()),
+                        Ok(())
+                    })?;
+                }
+                Err(err) => match err.kind() {
+                    io::ErrorKind::Interrupted => continue,
+                    io::ErrorKind::WouldBlock => continue,
+                    _ => return Err(err.into()),
+                },
+            };
+        }
+
+        return Ok(());
+    }
+
+    async fn on_error_response(&mut self) -> Result<(), Error> {
+        if let RequestState::ErrorResponse(ref mut response, ref mut continue_read) = self.state {
+            while !response.is_empty() {
+                match self.stream.write(response).await {
+                    Ok(n) => response.advance(n),
+                    Err(err) => match err.kind() {
+                        io::ErrorKind::Interrupted => continue,
+                        io::ErrorKind::WouldBlock => continue,
+                        _ => return Err(err.into()),
+                    },
+                }
+            }
+
+            if continue_read.is_some() {
+                self.state = RequestState::Parse(continue_read.take());
+                return Ok(());
+            }
+        }
+
+        self.state = RequestState::Finished;
+        Ok(())
+    }
+
+    async fn on_response(&mut self) -> Result<(), Error> {
+        if let RequestState::Response(ref mut buffer, ref mut body) = self.state {
+            let chunked_response = body.size_hint().exact().is_none();
+            let keep_alive = self.parser.should_keep_alive()
+                && (!chunked_response
+                    || matches!(
+                        self.parser.get_version().unwrap_or(http::Version::HTTP_11),
+                        http::Version::HTTP_11
+                    ));
+
+            let mut vectored_body_data: [MaybeUninit<IoSlice<'_>>; 4] =
+                unsafe { MaybeUninit::uninit().assume_init() };
+
+            while !buffer.is_empty() {
+                match self.stream.write(buffer).await {
+                    Ok(n) => _ = buffer.split_to(n),
+                    Err(err) => match err.kind() {
+                        io::ErrorKind::Interrupted => continue,
+                        io::ErrorKind::WouldBlock => continue,
+                        _ => return Err(err.into()),
+                    },
                 };
             }
 
-            registry.reregister(&mut self.stream, event.token(), Interest::WRITABLE)?;
-            if let Some(Error::HTTPResponseError(response)) = context.error {
-                self.state = RequestState::ErrorResponse(response, false);
-            } else if context.error.is_some() {
-                debug!("Error parsing request: {:?}", context.error);
-                self.state = RequestState::ErrorResponse(RESPONSE_BAD_REQUEST, false);
-            } else if context.expect_continue {
-                self.state = RequestState::ErrorResponse(RESPONSE_CONTINUE, true);
-            } else {
-                let (buffer, body, chunked_response) = self.get_response(py)?;
-                self.state = RequestState::Response(buffer, body, chunked_response, false);
-            }
+            while !body.is_end_stream() {
+                let vectored_body_buffer = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        vectored_body_data.as_mut_ptr() as *mut IoSlice<'_>,
+                        4,
+                    )
+                };
 
-            Ok(true)
-        })
-    }
+                let current_chunk = match body.take_current_chunk() {
+                    Some(chunk) => chunk,
+                    None => {
+                        Python::with_gil(|py| body.poll_from_iter(py))?;
+                        body.take_current_chunk().unwrap()
+                    }
+                };
 
-    fn on_write_error_response(
-        &mut self,
-        registry: &Registry,
-        event: &Event,
-    ) -> Result<bool, Error> {
-        if let RequestState::ErrorResponse(ref mut response, continue_read) = self.state {
-            while !response.is_empty() {
-                match self.stream.write(response) {
-                    Ok(n) => response.advance(n),
-                    Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(true),
-                    Err(ref err) if err.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(e) => return Err(e.into()),
-                }
-            }
+                let start_chunk_bytes: Vec<u8> = if chunked_response {
+                    format!("{:X}\r\n", current_chunk.chunk().remaining()).into_bytes()
+                } else {
+                    vec![]
+                };
 
-            if continue_read {
-                self.state = RequestState::Parse;
-                registry.reregister(&mut self.stream, event.token(), Interest::READABLE)?;
-                return Ok(true);
-            }
-        }
-
-        Ok(false)
-    }
-
-    fn on_write_response(&mut self, registry: &Registry, event: &Event) -> Result<bool, Error> {
-        Python::with_gil(|py| -> Result<bool, Error> {
-            if let RequestState::Response(
-                ref mut buffer,
-                ref mut body,
-                chunked_response,
-                ref mut chunking,
-            ) = self.state
-            {
-                let keep_alive = self.parser.should_keep_alive()
-                    && (!chunked_response
-                        || matches!(
-                            self.parser.get_version().unwrap_or(http::Version::HTTP_11),
-                            http::Version::HTTP_11
-                        ));
-
-                while !body.is_end_stream() || !buffer.is_empty() {
-                    let pool = unsafe { py.new_pool() };
-                    let py = pool.python();
-
-                    while !buffer.is_empty() {
-                        match self.stream.write(buffer) {
-                            Ok(n) => _ = buffer.split_to(n),
-                            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
-                                return Ok(true)
-                            }
-                            Err(ref err) if err.kind() == io::ErrorKind::Interrupted => continue,
-                            Err(e) => return Err(e.into()),
-                        };
+                let mut write_buffer = if chunked_response {
+                    let mut size = 3;
+                    vectored_body_buffer[0] = IoSlice::new(&start_chunk_bytes);
+                    vectored_body_buffer[1] = IoSlice::new(current_chunk.chunk());
+                    vectored_body_buffer[2] = IoSlice::new(b"\r\n");
+                    if body.is_end_stream() {
+                        vectored_body_buffer[3] = IoSlice::new(b"0\r\n\r\n");
+                        size += 1;
                     }
 
-                    body.poll_from_iter(py)?;
-                    let mut current_chunk = match body.take_current_chunk() {
-                        Some(chunk) => chunk,
-                        None => break, // no more data
-                    };
-
-                    if current_chunk.is_new() && chunked_response && !*chunking {
-                        buffer.extend_from_slice(
-                            format!("{:X}\r\n", current_chunk.remaining()).as_bytes(),
-                        );
-                        body.set_current_chunk(current_chunk);
-                        *chunking = true;
-
-                        continue;
+                    unsafe {
+                        std::slice::from_raw_parts(
+                            vectored_body_data.as_ptr() as *const IoSlice<'_>,
+                            size,
+                        )
                     }
+                } else {
+                    vectored_body_buffer[0] = IoSlice::new(current_chunk.chunk());
 
-                    match self.stream.write(current_chunk.chunk()) {
-                        Ok(n) => current_chunk.advance(n),
-                        Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
-                            if current_chunk.remaining() > 0 {
-                                body.set_current_chunk(current_chunk);
+                    unsafe {
+                        std::slice::from_raw_parts(
+                            vectored_body_data.as_ptr() as *const IoSlice<'_>,
+                            1,
+                        )
+                    }
+                };
+
+                while !write_buffer.is_empty() {
+                    match self.stream.write_vectored(write_buffer).await {
+                        Ok(mut n) => {
+                            let mut write_buffer_new_size = 0;
+                            for slice in write_buffer.iter() {
+                                let adv_size = slice.len().min(n);
+                                if adv_size == slice.len() {
+                                    continue;
+                                }
+
+                                write_buffer_new_size += 1;
+                                n -= adv_size;
+                                vectored_body_buffer[write_buffer_new_size - 1] =
+                                    IoSlice::new(&slice[adv_size..]);
                             }
 
-                            return Ok(true);
+                            write_buffer = unsafe {
+                                std::slice::from_raw_parts(
+                                    vectored_body_data.as_ptr() as *const IoSlice<'_>,
+                                    write_buffer_new_size,
+                                )
+                            }
                         }
-                        Err(ref err) if err.kind() == io::ErrorKind::Interrupted => {
-                            if current_chunk.remaining() > 0 {
-                                body.set_current_chunk(current_chunk);
-                            }
-
-                            continue;
-                        }
-                        Err(e) => return Err(e.into()),
+                        Err(err) => match err.kind() {
+                            io::ErrorKind::Interrupted => continue,
+                            io::ErrorKind::WouldBlock => continue,
+                            _ => return Err(err.into()),
+                        },
                     };
-
-                    body.poll_from_iter(py)?;
-                    if *chunking {
-                        buffer.extend_from_slice(b"\r\n");
-                        *chunking = false;
-                    }
-
-                    if chunked_response && body.is_end_stream() {
-                        buffer.extend_from_slice(b"0\r\n\r\n");
-                    }
-                }
-
-                if !keep_alive {
-                    return Ok(false);
                 }
             }
 
-            self.reset(registry, event)?;
-            Ok(true)
-        })
+            if !keep_alive {
+                self.state = RequestState::Finished;
+                return Ok(());
+            }
+        }
+
+        self.reset()?;
+        Ok(())
     }
 
-    pub(crate) fn handle(&mut self, registry: &Registry, event: &Event) -> Result<bool, Error> {
-        if event.is_readable() {
-            if matches!(self.state, RequestState::Parse | RequestState::Handshake)
-                && !self.on_read_or_handshake(registry, event)?
-            {
-                return Ok(false);
+    pub(crate) async fn handle(&mut self) -> Result<(), Error> {
+        loop {
+            match self.state {
+                RequestState::Parse(..) => self.on_parse().await?,
+                RequestState::ErrorResponse(..) => self.on_error_response().await?,
+                RequestState::Response(..) => self.on_response().await?,
+                RequestState::Finished => break,
             }
         }
 
-        if event.is_writable() {
-            if matches!(self.state, RequestState::Handshake)
-                && !self.on_read_or_handshake(registry, event)?
-            {
-                return Ok(false);
-            }
-
-            if matches!(self.state, RequestState::Response(..))
-                && !self.on_write_response(registry, event)?
-            {
-                return Ok(false);
-            }
-
-            if matches!(self.state, RequestState::ErrorResponse(..))
-                && !self.on_write_error_response(registry, event)?
-            {
-                return Ok(false);
-            }
-        }
-
-        Ok(true)
+        Ok(())
     }
 }

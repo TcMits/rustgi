@@ -3,10 +3,6 @@ use std::fs;
 use std::io::{BufReader, Read};
 use std::sync::Arc;
 
-#[cfg(not(target_env = "msvc"))]
-#[global_allocator]
-static GLOBAL: jemallocator::Jemalloc = jemallocator::Jemalloc;
-
 fn load_certs(filename: &str) -> PyResult<Vec<rustls::Certificate>> {
     let certfile = fs::File::open(filename)?;
     let mut reader = BufReader::new(certfile);
@@ -107,14 +103,18 @@ struct TLSConfig {
 
 impl TLSConfig {
     fn into_server_config(self) -> PyResult<rustls::ServerConfig> {
-        rustls::ServerConfig::builder()
+        let mut config = rustls::ServerConfig::builder()
             .with_cipher_suites(&self.suites)
             .with_safe_default_kx_groups()
             .with_protocol_versions(&self.versions)
             .map_err(|_| PyErr::new::<pyo3::exceptions::PyValueError, _>("invalid versions"))?
             .with_no_client_auth()
             .with_single_cert_with_ocsp_and_sct(self.certs, self.key, self.ocsp, vec![])
-            .map_err(|_| PyErr::new::<pyo3::exceptions::PyValueError, _>("invalid certs"))
+            .map_err(|_| PyErr::new::<pyo3::exceptions::PyValueError, _>("invalid certs"))?;
+
+        config.alpn_protocols = vec!["http/1.0".into(), "http/1.1".into()];
+
+        Ok(config)
     }
 }
 

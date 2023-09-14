@@ -1,20 +1,12 @@
 use crate::error::Error;
 use crate::request::Request;
 use log::{debug, info};
-use mio::net::TcpListener;
-use mio::{Events, Interest, Poll, Token};
-use mio_signals::{Signal, Signals};
 use pyo3::prelude::*;
-use slab::Slab;
-use std::io;
 use std::net::SocketAddr;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
-
-// Setup some tokens to allow us to identify which event is for which socket.
-const SERVER: Token = Token(usize::MAX);
-const SIGNAL: Token = Token(usize::MAX - 2);
+use tokio::net::TcpListener;
+use tokio_rustls::TlsAcceptor;
 
 struct RustgiRef {
     app: PyObject,
@@ -68,101 +60,63 @@ impl Rustgi {
         self.inner.tls_config.clone()
     }
 
-    pub fn is_tls_enabled(&self) -> bool {
-        self.inner.tls_config.is_some()
-    }
-
     pub fn serve(&self) -> Result<(), Error> {
-        let mut connections = Slab::<Request>::with_capacity(1024);
-        let mut events = Events::with_capacity(1024);
-        let mut poll = Poll::new()?;
-
-        // Setup the TCP server socket.
-        let mut server = TcpListener::bind(self.inner.address)?;
-        poll.registry()
-            .register(&mut server, SERVER, Interest::READABLE)?;
-
-        // Create a `Signals` instance that will catch signals for us.
-        let mut signals = Signals::new(Signal::Interrupt | Signal::Quit)?;
-        poll.registry()
-            .register(&mut signals, SIGNAL, Interest::READABLE)?;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()?;
+        let local = tokio::task::LocalSet::new();
+        let acceptor = match self.get_tls_config() {
+            Some(config) => Some(TlsAcceptor::from(config)),
+            None => None,
+        };
 
         info!("You can connect to the server using `nc`:");
         info!("$ nc {}", self.inner.address.to_string());
 
-        loop {
-            if let Err(err) = poll.poll(&mut events, Some(Duration::from_millis(10))) {
-                if err.kind() == io::ErrorKind::Interrupted {
-                    continue;
+        local.block_on(&rt, async {
+            let listener = TcpListener::bind(self.inner.address).await?;
+
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Ctrl-C received, shutting down");
                 }
-
-                return Err(err.into());
-            }
-
-            for event in events.iter() {
-                match event.token() {
-                    SERVER => loop {
-                        let connection = match server.accept() {
-                            Ok((connection, _)) => connection,
-                            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                                break;
-                            }
+                _ = async {
+                    loop {
+                        let stream = match listener.accept().await {
+                            Ok((stream, _)) => stream,
                             Err(e) => {
                                 debug!("Error accepting connection: {}", e);
-                                break;
-                            }
-                        };
-
-                        let entry = connections.vacant_entry();
-                        let key = entry.key();
-                        match Request::new(self.clone(), connection, poll.registry(), Token(key)) {
-                            Ok(r) => {
-                                entry.insert(r);
-                            }
-                            Err(e) => {
-                                debug!("Error register connection: {}", e);
-                            }
-                        };
-                    },
-                    SIGNAL => {
-                        // Received a signal from the OS.
-                        match signals.receive()? {
-                            Some(Signal::Interrupt) => {
-                                // Ctrl-C was pressed.
-                                info!("Ctrl-C pressed, shutting down");
-                                return Ok(());
-                            }
-                            Some(Signal::Quit) => {
-                                // Ctrl-\ was pressed.
-                                info!("Ctrl-\\ pressed, shutting down");
-                                return Ok(());
-                            }
-                            _ => {}
-                        }
-                    }
-                    token => {
-                        // Maybe received an event for a TCP connection.
-                        if let Some(conn) = connections.get_mut(token.0) {
-                            let registry = poll.registry();
-
-                            if match conn.handle(registry, event) {
-                                Ok(resume) => resume,
-                                Err(err) => {
-                                    debug!("Error handling connection: {}", err);
-                                    false
-                                }
-                            } {
                                 continue;
+                            }
+                        };
+                        let rustgi = self.clone();
+                        let acceptor = acceptor.clone();
+
+                        tokio::task::spawn_local(async move {
+                            let mut request = match acceptor {
+                                Some(ref acceptor) => {
+                                    let stream = match acceptor.accept(stream).await {
+                                        Ok(stream) => stream,
+                                        Err(e) => {
+                                            debug!("Error accepting TLS connection: {}", e);
+                                            return;
+                                        }
+                                    };
+                                    Request::new(rustgi, stream.into())
+                                }
+                                None => Request::new(rustgi, stream.into()),
                             };
 
-                            if let Err(err) = conn.clean(registry) {
-                                debug!("Error closing connection: {}", err);
-                            };
-                            connections.remove(token.0);
-                        };
+
+                            if let Err(e) = request.handle().await {
+                                debug!("Error serving request: {}", e);
+                            }
+                        });
                     }
-                }
-            }
-        }
+                } => {}
+            };
+
+            Ok(())
+        })
     }
 }
