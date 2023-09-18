@@ -8,6 +8,7 @@ use pyo3::types::{PyIterator, PyTuple};
 use pyo3::{prelude::*, AsPyPointer};
 use pyo3::{Py, PyObject};
 use std::str::FromStr;
+use std::sync::Arc;
 
 struct WSGIResponseConfig {
     head_bytes: BytesMut,
@@ -16,16 +17,16 @@ struct WSGIResponseConfig {
 
 #[pyclass]
 pub(crate) struct WSGIStartResponse {
-    config: WSGIResponseConfig,
+    config: Arc<WSGIResponseConfig>,
 }
 
 impl WSGIStartResponse {
     pub(crate) fn new(initial_bytes: BytesMut) -> Self {
         Self {
-            config: WSGIResponseConfig {
+            config: Arc::new(WSGIResponseConfig {
                 head_bytes: initial_bytes,
                 content_length: None,
-            },
+            }),
         }
     }
 }
@@ -40,8 +41,7 @@ impl WSGIStartResponse {
         exc_info: Option<&PyTuple>,
     ) -> PyResult<()> {
         let _ = exc_info;
-        let this =
-            unsafe { &mut *(&self.config as *const WSGIResponseConfig as *mut WSGIResponseConfig) };
+        let this = unsafe { &mut *(Arc::as_ptr(&self.config) as *mut WSGIResponseConfig) };
 
         let status_pair = status
             .split_once(' ')
@@ -79,18 +79,18 @@ impl WSGIStartResponse {
 
 impl WSGIStartResponse {
     pub(crate) fn take_body_builder(&mut self, wsgi_iter: PyObject) -> WSGIResponseBuilder {
-        WSGIResponseBuilder::new(&mut self.config as *mut _, wsgi_iter)
+        WSGIResponseBuilder::new(self.config.clone(), wsgi_iter)
     }
 }
 
 /// WSGI response builder.
 pub(crate) struct WSGIResponseBuilder {
-    config: *mut WSGIResponseConfig,
+    config: Arc<WSGIResponseConfig>,
     wsgi_iter: PyObject,
 }
 
 impl WSGIResponseBuilder {
-    fn new(config: *mut WSGIResponseConfig, wsgi_iter: PyObject) -> Self {
+    fn new(config: Arc<WSGIResponseConfig>, wsgi_iter: PyObject) -> Self {
         Self { config, wsgi_iter }
     }
 
@@ -120,7 +120,7 @@ impl WSGIResponseBuilder {
             }
         };
 
-        let config = unsafe { &mut *self.config };
+        let config = unsafe { &mut *(Arc::as_ptr(&self.config) as *mut WSGIResponseConfig) };
         body.set_content_length(config.content_length);
         Ok((config.head_bytes.split(), body))
     }
