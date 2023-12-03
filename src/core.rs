@@ -147,8 +147,8 @@ impl Rustgi {
         unsafe {
             PyDict_SetItemString(
                 environ.as_ptr(),
-                "wsgi.errors\0".as_ptr() as *const i8,
-                PySys_GetObject("stderr\0".as_ptr() as *const i8),
+                "wsgi.errors\0".as_ptr() as *const _,
+                PySys_GetObject("stderr\0".as_ptr() as *const _),
             )
         };
         // tell Flask/other WSGI apps that the input has been terminated
