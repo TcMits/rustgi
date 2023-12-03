@@ -4,16 +4,15 @@ use pyo3::{
     AsPyPointer, Py,
 };
 
-#[derive(Debug)]
-pub(crate) struct PyBytesBuf(Py<PyBytes>);
+pub struct PyBytesBuf(Py<PyBytes>);
 
 impl PyBytesBuf {
+    #[inline]
     pub(crate) fn new(b: Py<PyBytes>) -> Self {
         Self(b)
     }
-}
 
-impl PyBytesBuf {
+    #[inline]
     pub(crate) fn chunk(&self) -> &[u8] {
         // safe because Python bytes are immutable, the result may be used for as long as the reference to
         unsafe {

@@ -10,9 +10,10 @@ pub enum Error {
     IOError(std::io::Error),
     AddrParseError(std::net::AddrParseError),
     UTF8Error(std::str::Utf8Error),
-    LLHTTPError(llhttp_rs::Error),
     TLSError(rustls::Error),
-    HTTPResponseError(&'static [u8]),
+    HyperError(hyper::Error),
+    HyperToStrError(hyper::header::ToStrError),
+    BoxError(Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl From<PyErr> for Error {
@@ -51,21 +52,27 @@ impl From<std::str::Utf8Error> for Error {
     }
 }
 
-impl From<llhttp_rs::Error> for Error {
-    fn from(err: llhttp_rs::Error) -> Self {
-        Self::LLHTTPError(err)
-    }
-}
-
 impl From<rustls::Error> for Error {
     fn from(err: rustls::Error) -> Self {
         Self::TLSError(err)
     }
 }
 
-impl From<&'static [u8]> for Error {
-    fn from(err: &'static [u8]) -> Self {
-        Self::HTTPResponseError(err)
+impl From<hyper::header::ToStrError> for Error {
+    fn from(err: hyper::header::ToStrError) -> Self {
+        Self::HyperToStrError(err)
+    }
+}
+
+impl From<hyper::Error> for Error {
+    fn from(err: hyper::Error) -> Self {
+        Self::HyperError(err)
+    }
+}
+
+impl From<Box<dyn std::error::Error + Send + Sync>> for Error {
+    fn from(err: Box<dyn std::error::Error + Send + Sync>) -> Self {
+        Self::BoxError(err)
     }
 }
 
@@ -78,9 +85,10 @@ impl std::fmt::Display for Error {
             Self::IOError(err) => write!(f, "IOError: {}", err),
             Self::AddrParseError(err) => write!(f, "AddrParseError: {}", err),
             Self::UTF8Error(err) => write!(f, "UTF8Error: {}", err),
-            Self::LLHTTPError(err) => write!(f, "LLHTTPError: {}", err),
             Self::TLSError(err) => write!(f, "TLSError: {}", err),
-            Self::HTTPResponseError(err) => write!(f, "HTTPResponseError: {:?}", err),
+            Self::HyperError(err) => write!(f, "HyperError: {}", err),
+            Self::HyperToStrError(err) => write!(f, "HyperToStrError: {}", err),
+            Self::BoxError(err) => write!(f, "BoxError: {}", err),
         }
     }
 }
@@ -94,9 +102,10 @@ impl std::error::Error for Error {
             Self::IOError(err) => Some(err),
             Self::AddrParseError(err) => Some(err),
             Self::UTF8Error(err) => Some(err),
-            Self::LLHTTPError(err) => Some(err),
             Self::TLSError(err) => Some(err),
-            Self::HTTPResponseError(_) => None,
+            Self::HyperError(err) => Some(err),
+            Self::HyperToStrError(err) => Some(err),
+            Self::BoxError(err) => Some(err.as_ref()),
         }
     }
 }
@@ -118,14 +127,17 @@ impl From<Error> for PyErr {
             Error::UTF8Error(err) => {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{}", err))
             }
-            Error::LLHTTPError(err) => {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{}", err))
-            }
             Error::TLSError(err) => {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{}", err))
             }
-            Error::HTTPResponseError(err) => {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{:?}", err))
+            Error::HyperError(err) => {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{}", err))
+            }
+            Error::HyperToStrError(err) => {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{}", err))
+            }
+            Error::BoxError(err) => {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{}", err.as_ref()))
             }
         }
     }

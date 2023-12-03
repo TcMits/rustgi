@@ -1,7 +1,9 @@
 use crate::error::Error;
 use crate::types::PyBytesBuf;
-use bytes::{Buf, BytesMut};
-use http::StatusCode;
+use hyper::body;
+use hyper::body::Buf;
+use hyper::body::Bytes;
+use hyper::Response;
 use pyo3::exceptions::PyValueError;
 use pyo3::ffi::{PyBytes_Check, PyList_Check, PyList_Size};
 use pyo3::types::{PyIterator, PyTuple};
@@ -11,7 +13,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 struct WSGIResponseConfig {
-    head_bytes: BytesMut,
+    builder: Option<http::response::Builder>,
     content_length: Option<u64>,
 }
 
@@ -21,10 +23,10 @@ pub(crate) struct WSGIStartResponse {
 }
 
 impl WSGIStartResponse {
-    pub(crate) fn new(initial_bytes: BytesMut) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             config: Arc::new(WSGIResponseConfig {
-                head_bytes: initial_bytes,
+                builder: Some(http::response::Builder::new()),
                 content_length: None,
             }),
         }
@@ -47,30 +49,20 @@ impl WSGIStartResponse {
             .split_once(' ')
             .ok_or(PyValueError::new_err("invalid status"))?;
 
-        let status = StatusCode::from_str(status_pair.0).map_err(|_| {
-            PyValueError::new_err(format!("invalid status code: {}", status_pair.0))
-        })?;
+        if let Some(mut builder) = this.builder.take() {
+            builder = builder.status(status_pair.0);
+            for (key, value) in headers {
+                builder = builder.header(key, value);
 
-        this.head_bytes
-            .extend_from_slice(status.as_str().as_bytes());
-        this.head_bytes.extend_from_slice(b" ");
-        this.head_bytes
-            .extend_from_slice(status.canonical_reason().unwrap_or("Unknown").as_bytes());
-        this.head_bytes.extend_from_slice(b"\r\n");
-
-        for (key, value) in headers {
-            if key.eq_ignore_ascii_case("Content-Length") {
-                this.content_length = Some(value.parse().map_err(|_| {
-                    PyValueError::new_err(format!("invalid content-length: {}", value))
-                })?);
-
-                continue;
+                if key.eq_ignore_ascii_case("content-length") {
+                    this.content_length = Some(
+                        u64::from_str(value)
+                            .map_err(|_| PyValueError::new_err("invalid content-length"))?,
+                    );
+                }
             }
 
-            this.head_bytes.extend_from_slice(key.as_bytes());
-            this.head_bytes.extend_from_slice(b": ");
-            this.head_bytes.extend_from_slice(value.as_bytes());
-            this.head_bytes.extend_from_slice(b"\r\n");
+            this.builder.replace(builder);
         }
 
         Ok(())
@@ -94,7 +86,7 @@ impl WSGIResponseBuilder {
         Self { config, wsgi_iter }
     }
 
-    pub(crate) fn build(self, py: Python<'_>) -> Result<(BytesMut, WSGIResponseBody), Error> {
+    pub(crate) fn build(self, py: Python<'_>) -> Result<Response<WSGIResponseBody>, Error> {
         let mut wsgi_iter = self.wsgi_iter;
 
         // optimize for the common case of a single string
@@ -122,11 +114,10 @@ impl WSGIResponseBuilder {
 
         let config = unsafe { &mut *(Arc::as_ptr(&self.config) as *mut WSGIResponseConfig) };
         body.set_content_length(config.content_length);
-        Ok((config.head_bytes.split(), body))
+        Ok(config.builder.take().unwrap().body(body)?)
     }
 }
 
-#[derive(Debug)]
 pub(crate) struct WSGIResponseBody {
     current_chunk: Option<PyBytesBuf>,
     next_chunk: Option<PyBytesBuf>,
@@ -181,13 +172,30 @@ impl WSGIResponseBody {
 
         Ok(())
     }
+}
 
-    pub(crate) fn is_end_stream(&self) -> bool {
+impl body::Body for WSGIResponseBody {
+    type Data = Bytes;
+    type Error = Error;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<body::Frame<Self::Data>, Self::Error>>> {
+        Python::with_gil(|py| self.poll_from_iter(py))?;
+        std::task::Poll::Ready(self.take_current_chunk().map(|chunk| {
+            Ok(body::Frame::data(hyper::body::Bytes::copy_from_slice(
+                chunk.chunk(),
+            )))
+        }))
+    }
+
+    fn is_end_stream(&self) -> bool {
         self.current_chunk.is_none() && self.next_chunk.is_none()
     }
 
-    pub(crate) fn size_hint(&self) -> http_body::SizeHint {
-        let mut sh = http_body::SizeHint::new();
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        let mut sh = hyper::body::SizeHint::new();
 
         // If the content length is set, we can use it as the exact size
         if let Some(content_length) = self.content_length {

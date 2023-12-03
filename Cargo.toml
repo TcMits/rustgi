@@ -1,6 +1,6 @@
 [package]
 name = "rustgi"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -9,18 +9,21 @@ name = "rustgi"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-http = "0.2.9"
+http = "1.0.0"
 lazy_static = "1.4.0"
 pyo3 = "0.19.0"
 pyo3-log = { version = "0.8.1"}
 log = { version = "0.4.17" }
-bytes = "1.4.0"
-http-body = "0.4.5"
-llhttp_rs = { git = "https://github.com/TcMits/llhttp-rs.git", version = "0.1.0" }
 rustls = "0.21.6"
 rustls-pemfile = "1.0.3"
 tokio = { version = "1.32.0", features = ["net", "signal", "rt", "macros", "io-util"] }
 tokio-rustls = "0.24.1"
+hyper = { version = "1.0.1", features = ["server", "http1"] }
+http-body-util = "0.1.0"
+hyper-util = { git = "https://github.com/hyperium/hyper-util.git", rev = "bca85f782007de1cc72a4b0365cdfa1ef28afd5e", features = ["tokio", "http1", "server"] }
+tower = "0.4.13"
+tower-http = { version = "0.5.0", features = ["limit"] }
+futures = "0.3.29"
 
 [dev-dependencies]
 rustgi = { path = ".", features = ["python"] }
