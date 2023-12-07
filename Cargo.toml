@@ -14,10 +14,7 @@ lazy_static = "1.4.0"
 pyo3 = "0.19.0"
 pyo3-log = { version = "0.8.1"}
 log = { version = "0.4.17" }
-rustls = "0.21.6"
-rustls-pemfile = "1.0.3"
 tokio = { version = "1.32.0", features = ["net", "signal", "rt", "macros", "io-util"] }
-tokio-rustls = "0.24.1"
 hyper = { version = "1.0.1", features = ["server", "http1"] }
 http-body-util = "0.1.0"
 hyper-util = { git = "https://github.com/hyperium/hyper-util.git", rev = "bca85f782007de1cc72a4b0365cdfa1ef28afd5e", features = ["tokio", "http1", "server"] }

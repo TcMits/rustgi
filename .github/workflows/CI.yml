@@ -35,7 +35,7 @@ jobs:
             manylinux: auto
             target: i686
           - os: linux
-            manylinux: manylinux_2_28
+            manylinux: auto
             target: aarch64
           - os: linux
             manylinux: auto

@@ -8,16 +8,13 @@ use pyo3::types::PyDict;
 use pyo3::{intern, prelude::*, AsPyPointer};
 use std::net::SocketAddr;
 use std::rc::Rc;
-use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio_rustls::TlsAcceptor;
 use tower_http::body::Limited;
 
 struct RustgiRef {
     app: PyObject,
     address: SocketAddr,
     max_body_size: usize,
-    tls_config: Option<Arc<rustls::ServerConfig>>,
 }
 
 #[derive(Clone)]
@@ -32,17 +29,12 @@ impl Rustgi {
                 app,
                 address,
                 max_body_size: 1024 * 1024,
-                tls_config: None,
             }),
         }
     }
 
     pub fn set_max_body_size(&mut self, max_body_size: usize) {
         unsafe { &mut *(Rc::as_ptr(&self.inner) as *mut RustgiRef) }.max_body_size = max_body_size;
-    }
-
-    pub fn set_tls_config(&mut self, tls_config: Arc<rustls::ServerConfig>) {
-        unsafe { &mut *(Rc::as_ptr(&self.inner) as *mut RustgiRef) }.tls_config = Some(tls_config);
     }
 
     pub fn get_wsgi_app(&self) -> PyObject {
@@ -61,16 +53,11 @@ impl Rustgi {
         self.inner.max_body_size
     }
 
-    pub fn get_tls_config(&self) -> Option<Arc<rustls::ServerConfig>> {
-        self.inner.tls_config.clone()
-    }
-
     pub fn serve(&self) -> Result<(), Error> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_io()
             .build()?;
         let local = tokio::task::LocalSet::new();
-        let acceptor = self.get_tls_config().map(TlsAcceptor::from);
 
         info!("You can connect to the server using `nc`:");
         info!("$ nc {}", self.inner.address.to_string());
@@ -92,7 +79,6 @@ impl Rustgi {
                             }
                         };
                         let rustgi = self.clone();
-                        let acceptor = acceptor.clone();
 
                         tokio::task::spawn_local(async move {
                             let service = tower::ServiceBuilder::new()
@@ -102,33 +88,12 @@ impl Rustgi {
                                 .service(get_service::<Limited<Incoming>>(rustgi, remote_addr));
 
 
-                            match acceptor {
-                                Some(acceptor) => {
-                                    let stream = match acceptor.accept(stream).await {
-                                        Ok(stream) => stream,
-                                        Err(e) => {
-                                            debug!("Error accepting TLS connection: {}", e);
-                                            return;
-                                        }
-                                    };
-
-                                    if let Err(err) = http1::Builder::new().serve_connection(
-                                        hyper_util::rt::TokioIo::new(stream),
-                                        hyper_util::service::TowerToHyperService::new(service)
-                                    ).await {
-                                        debug!("Error serving connection: {}", err);
-                                    }
-                                }
-                                None => {
-                                    if let Err(err) = http1::Builder::new().serve_connection(
-                                        hyper_util::rt::TokioIo::new(stream),
-                                        hyper_util::service::TowerToHyperService::new(service)
-                                    ).await {
-                                        debug!("Error serving connection: {}", err);
-                                    }
-                                }
+                            if let Err(err) = http1::Builder::new().serve_connection(
+                                hyper_util::rt::TokioIo::new(stream),
+                                hyper_util::service::TowerToHyperService::new(service)
+                            ).await {
+                                debug!("Error serving connection: {}", err);
                             }
-
                         });
                     }
                 } => {}

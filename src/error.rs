@@ -10,7 +10,6 @@ pub enum Error {
     IOError(std::io::Error),
     AddrParseError(std::net::AddrParseError),
     UTF8Error(std::str::Utf8Error),
-    TLSError(rustls::Error),
     HyperError(hyper::Error),
     HyperToStrError(hyper::header::ToStrError),
     BoxError(Box<dyn std::error::Error + Send + Sync>),
@@ -52,12 +51,6 @@ impl From<std::str::Utf8Error> for Error {
     }
 }
 
-impl From<rustls::Error> for Error {
-    fn from(err: rustls::Error) -> Self {
-        Self::TLSError(err)
-    }
-}
-
 impl From<hyper::header::ToStrError> for Error {
     fn from(err: hyper::header::ToStrError) -> Self {
         Self::HyperToStrError(err)
@@ -85,7 +78,6 @@ impl std::fmt::Display for Error {
             Self::IOError(err) => write!(f, "IOError: {}", err),
             Self::AddrParseError(err) => write!(f, "AddrParseError: {}", err),
             Self::UTF8Error(err) => write!(f, "UTF8Error: {}", err),
-            Self::TLSError(err) => write!(f, "TLSError: {}", err),
             Self::HyperError(err) => write!(f, "HyperError: {}", err),
             Self::HyperToStrError(err) => write!(f, "HyperToStrError: {}", err),
             Self::BoxError(err) => write!(f, "BoxError: {}", err),
@@ -102,7 +94,6 @@ impl std::error::Error for Error {
             Self::IOError(err) => Some(err),
             Self::AddrParseError(err) => Some(err),
             Self::UTF8Error(err) => Some(err),
-            Self::TLSError(err) => Some(err),
             Self::HyperError(err) => Some(err),
             Self::HyperToStrError(err) => Some(err),
             Self::BoxError(err) => Some(err.as_ref()),
@@ -125,9 +116,6 @@ impl From<Error> for PyErr {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{}", err))
             }
             Error::UTF8Error(err) => {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{}", err))
-            }
-            Error::TLSError(err) => {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{}", err))
             }
             Error::HyperError(err) => {

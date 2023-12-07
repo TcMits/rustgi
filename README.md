@@ -6,7 +6,6 @@ rustgi is a fast, lightweight, single-thread Web Server Gateway Interface (WSGI)
 
 - serve WSGI
 - set max body size
-- tls
 
 ## Getting Started
 
@@ -19,7 +18,7 @@ Before running rustgi, make sure you have Rust and Cargo installed on your syste
 You can install rustgi with pip
 
 ```sh
-pip install git+https://github.com/TcMits/rustgi.git
+pip install rustgi
 ```
 
 ## Usage
