@@ -39,15 +39,15 @@ jobs:
           - os: linux
             manylinux: auto
             target: armv7
-            interpreter: 3.7 3.8 3.9 3.10 3.11 3.12
+            # interpreter: 3.7 3.8 3.9 3.10 3.11 3.12
           - os: linux
             manylinux: auto
             target: ppc64le
-            interpreter: 3.7 3.8 3.9 3.10 3.11 3.12
+            # interpreter: 3.7 3.8 3.9 3.10 3.11 3.12
           - os: linux
             manylinux: auto
             target: s390x
-            interpreter: 3.7 3.8 3.9 3.10 3.11 3.12
+            # interpreter: 3.7 3.8 3.9 3.10 3.11 3.12
           - os: linux
             manylinux: auto
             target: x86_64
@@ -61,7 +61,7 @@ jobs:
             target: x86_64
           - os: macos
             target: aarch64
-            interpreter: 3.7 3.8 3.9 pypy3.8 pypy3.9 pypy3.10
+            # interpreter: 3.7 3.8 3.9 pypy3.8 pypy3.9 pypy3.10
           - os: windows
             target: x86_64
             interpreter: 3.7 3.8 3.9 3.10 3.11 3.12
