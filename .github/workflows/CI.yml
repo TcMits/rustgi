@@ -27,7 +27,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [linux, macos, windows]
-        target: [x86_64, aarch64]
+        target: [x86_64]
         manylinux: [auto]
         include:
           - os: linux
@@ -70,9 +70,6 @@ jobs:
             target: i686
             python-architecture: x86
             interpreter: 3.7 3.8 3.9 3.10 3.11 3.12
-          - os: windows
-            target: aarch64
-            interpreter: 3.12
 
     runs-on: ${{ (matrix.os == 'linux' && 'ubuntu') || matrix.os }}-latest
     steps:
