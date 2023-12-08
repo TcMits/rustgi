@@ -95,7 +95,7 @@ jobs:
       - run: twine check --strict dist/*
       - uses: actions/upload-artifact@v3
         with:
-          name: pypi_files
+          name: wheels
           path: dist
 
   sdist:
