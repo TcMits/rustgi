@@ -67,11 +67,8 @@ def test_wsgi_chunked():
 
 
 def test_max_body_size():
-    with pytest.raises(requests.exceptions.ConnectionError):
-        requests.post(
-            HOST_WITH_SCHEME + "/echo", data=("xxxxxx\n" for _ in range(1024 * 67))
-        )
-
+    r = requests.post(HOST_WITH_SCHEME + "/echo", data=("xxxxxx\n" for _ in range(1024 * 67)))
+    assert r.status_code == 413
 
 def test_wsgi_100_continue():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:

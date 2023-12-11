@@ -87,7 +87,21 @@ where
 
             let mut body = http_body_util::BodyStream::new(req.into_body());
             while let Some(frame) = body.next().await {
-                let frame = frame.map_err(|err| err.into())?;
+                let frame = match frame {
+                    Ok(frame) => frame,
+                    Err(err) => {
+                        let err: Box<_> = err.into();
+                        if let Some(_) = err.downcast_ref::<http_body_util::LengthLimitError>() {
+                            return Ok(Response::builder()
+                                .status(413)
+                                .body(WSGIResponseBody::empty())
+                                .unwrap());
+                        }
+
+                        return Err(err.into());
+                    }
+                };
+
                 if frame.is_trailers() {
                     continue;
                 }

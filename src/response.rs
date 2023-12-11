@@ -135,7 +135,7 @@ impl WSGIResponseBody {
         }
     }
 
-    fn empty() -> Self {
+    pub(crate) fn empty() -> Self {
         Self {
             current_chunk: None,
             next_chunk: None,
