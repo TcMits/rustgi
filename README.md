@@ -9,10 +9,6 @@ rustgi is a fast, lightweight, single-thread Web Server Gateway Interface (WSGI)
 
 ## Getting Started
 
-### Prerequisites
-
-Before running rustgi, make sure you have Rust and Cargo installed on your system. You can install them by following the [official Rust installation guide](https://www.rust-lang.org/tools/install)
-
 ### Installation
 
 You can install rustgi with pip
