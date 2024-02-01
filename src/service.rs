@@ -109,7 +109,10 @@ where
                 let frame = frame.into_data().unwrap();
                 Python::with_gil(|py| -> Result<(), Error> {
                     let environ = environ.as_ref(py);
-                    let input = environ.get_item(intern!(py, "wsgi.input")).unwrap();
+                    let input = environ
+                        .get_item(intern!(py, "wsgi.input"))
+                        .unwrap()
+                        .unwrap();
                     input.call_method1(intern!(py, "write"), (frame.as_ref(),))?;
                     Ok(())
                 })?;
@@ -118,7 +121,10 @@ where
             Python::with_gil(|py| -> Result<Response<WSGIResponseBody>, Error> {
                 let builder = {
                     let environ = environ.as_ref(py);
-                    let input = environ.get_item(intern!(py, "wsgi.input")).unwrap();
+                    let input = environ
+                        .get_item(intern!(py, "wsgi.input"))
+                        .unwrap()
+                        .unwrap();
                     input.call_method1(intern!(py, "seek"), (0,))?;
                     let wsgi_response_config = Py::new(py, WSGIStartResponse::new())?;
                     let wsgi_iter = rustgi
