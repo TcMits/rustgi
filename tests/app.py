@@ -1,7 +1,7 @@
 import json
 import logging
 import rustgi
-import os
+import urllib.parse
 
 
 FORMAT = "%(levelname)s %(name)s %(asctime)-15s %(filename)s:%(lineno)d %(message)s"
@@ -65,7 +65,7 @@ def app(environ, protocol):
         "/mã": echo,
         "/": echo,
         "": echo,
-    }[environ["PATH_INFO"]](environ, protocol)
+    }[environ["PATH_INFO"].encode("iso-8859-1").decode()](environ, protocol)
 
 
 rustgi.serve(

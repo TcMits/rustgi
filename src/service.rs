@@ -1,14 +1,15 @@
-use futures::StreamExt;
-use pyo3::prelude::*;
-use urlencoding::decode;
-
 use crate::core::Rustgi;
 use crate::error::Error;
 use crate::response::{WSGIResponseBody, WSGIStartResponse};
+use encoding::all::ISO_8859_1;
+use encoding::{DecoderTrap, Encoding};
+use futures::StreamExt;
 use hyper::{body::Body, Request, Response, Version};
 use lazy_static::lazy_static;
+use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 use pyo3::{intern, Py, Python};
+use urlencoding::decode_binary;
 
 lazy_static! {
     static ref PY_BYTES_IO: PyObject = Python::with_gil(|py| PyModule::import(py, "io")
@@ -49,7 +50,12 @@ where
                 let uri = req.uri();
                 environ.set_item(
                     intern!(py, "PATH_INFO"),
-                    decode(uri.path()).unwrap_or("".into()),
+                    ISO_8859_1
+                        .decode(
+                            decode_binary(uri.path().as_bytes()).as_ref(),
+                            DecoderTrap::Replace,
+                        )
+                        .unwrap_or("".into()),
                 )?; // i don't understand???? https://peps.python.org/pep-3333/#url-reconstruction
                 environ.set_item(intern!(py, "QUERY_STRING"), uri.query().unwrap_or(""))?;
                 environ.set_item(
