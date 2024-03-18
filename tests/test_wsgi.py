@@ -67,8 +67,11 @@ def test_wsgi_chunked():
 
 
 def test_max_body_size():
-    r = requests.post(HOST_WITH_SCHEME + "/echo", data=("xxxxxx\n" for _ in range(1024 * 67)))
+    r = requests.post(
+        HOST_WITH_SCHEME + "/echo", data=("xxxxxx\n" for _ in range(1024 * 67))
+    )
     assert r.status_code == 413
+
 
 def test_wsgi_100_continue():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
@@ -87,3 +90,9 @@ def test_wsgi_100_continue():
         client.send("hello".encode("utf8"))
         result = client.recv(1024)
         assert result.endswith(b"hello")
+
+
+def test_unicode():
+    r = requests.get(HOST_WITH_SCHEME + "/mã", data="hello")
+    assert r.status_code == 200
+    assert r.text == "hello"

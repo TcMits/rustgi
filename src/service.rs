@@ -1,5 +1,6 @@
 use futures::StreamExt;
 use pyo3::prelude::*;
+use urlencoding::decode;
 
 use crate::core::Rustgi;
 use crate::error::Error;
@@ -46,7 +47,10 @@ where
                 environ.set_item(intern!(py, "REQUEST_METHOD"), req.method().as_str())?;
 
                 let uri = req.uri();
-                environ.set_item(intern!(py, "PATH_INFO"), uri.path())?;
+                environ.set_item(
+                    intern!(py, "PATH_INFO"),
+                    decode(uri.path()).unwrap_or("".into()),
+                )?; // i don't understand???? https://peps.python.org/pep-3333/#url-reconstruction
                 environ.set_item(intern!(py, "QUERY_STRING"), uri.query().unwrap_or(""))?;
                 environ.set_item(
                     intern!(py, "wsgi.url_scheme"),
