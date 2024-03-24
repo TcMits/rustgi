@@ -94,29 +94,79 @@ jobs:
           path: dist
 
   build-nogil:
-    name: build nogil on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+    name: build nogil on ${{ matrix.os }} (${{ matrix.target }} - ${{ matrix.interpreter || 'all' }}${{ matrix.os == 'linux' && format(' - {0}', matrix.manylinux == 'auto' && 'manylinux' || matrix.manylinux) || '' }})
+    # only run on push to main and on release
+    if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main'
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-20.04, windows-2019, macos-12]
+        os: [linux, macos, windows]
+        target: [x86_64]
+        manylinux: [auto]
+        include:
+          - os: linux
+            manylinux: auto
+            target: i686
+          - os: linux
+            manylinux: auto
+            target: aarch64
+          - os: linux
+            manylinux: auto
+            target: armv7
+          - os: linux
+            manylinux: auto
+            target: ppc64le
+          - os: linux
+            manylinux: auto
+            target: s390x
+          - os: linux
+            manylinux: auto
+            target: x86_64
+          - os: linux
+            manylinux: musllinux_1_1
+            target: x86_64
+          - os: linux
+            manylinux: musllinux_1_1
+            target: aarch64
+          - os: macos
+            target: x86_64
+          - os: macos
+            target: aarch64
+          - os: windows
+            target: x86_64
+            interpreter: "3.9"
+          - os: windows
+            target: i686
+            python-architecture: x86
+            interpreter: "3.9"
 
+    runs-on: ${{ (matrix.os == 'linux' && 'ubuntu') || matrix.os }}-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build wheels
-        uses: colesbury/cibuildwheel@nogil
-        env:
-          CIBW_BUILD: nogil39-*
-          CIBW_ARCHS_LINUX: auto
-          CIBW_ARCHS_MACOS: universal2
-          CIBW_ARCHS_WINDOWS: AMD64
-          CIBW_BEFORE_BUILD: 'pip install -U cython'
+      - name: set up python
+        uses: colesbury/setup-python@nogil
+        with:
+          python-version: 'nogil-3.9'
+          architecture: ${{ matrix.python-architecture || 'x64' }}
 
+      - run: pip install -U twine
+
+      - name: build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux == 'manylinux' && 'auto' || matrix.manylinux }}
+          args: --release --out dist --interpreter ${{ matrix.interpreter || '3.9' }}
+          rust-toolchain: stable
+          docker-options: -e CI
+      - run: ${{ (matrix.os == 'windows' && 'dir') || 'ls -lh' }} dist/
+      - run: twine check --strict dist/*
       - uses: actions/upload-artifact@v3
         with:
           name: wheels
-          path: ./wheelhouse/*.whl
+          path: dist
+
 
   sdist:
     runs-on: ubuntu-latest
