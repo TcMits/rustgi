@@ -93,6 +93,31 @@ jobs:
           name: wheels
           path: dist
 
+  build-nogil:
+    name: build nogil on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-20.04, windows-2019, macos-12]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build wheels
+        uses: colesbury/cibuildwheel@nogil
+        env:
+          CIBW_BUILD: nogil39-*
+          CIBW_ARCHS_LINUX: auto
+          CIBW_ARCHS_MACOS: universal2
+          CIBW_ARCHS_WINDOWS: AMD64
+          CIBW_BEFORE_BUILD: 'pip install -U cython'
+
+      - uses: actions/upload-artifact@v3
+        with:
+          name: wheels
+          path: ./wheelhouse/*.whl
+
   sdist:
     runs-on: ubuntu-latest
     steps:
