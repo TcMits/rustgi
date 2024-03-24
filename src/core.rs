@@ -7,50 +7,43 @@ use pyo3::ffi::{PyDict_SetItemString, PySys_GetObject};
 use pyo3::types::PyDict;
 use pyo3::{intern, prelude::*, AsPyPointer};
 use std::net::SocketAddr;
-use std::rc::Rc;
 use tokio::net::TcpListener;
 use tower_http::body::Limited;
 
-struct RustgiRef {
+#[derive(Clone)]
+pub struct Rustgi {
     app: PyObject,
     address: SocketAddr,
     max_body_size: usize,
 }
 
-#[derive(Clone)]
-pub struct Rustgi {
-    inner: Rc<RustgiRef>,
-}
-
 impl Rustgi {
     pub fn new(address: SocketAddr, app: PyObject) -> Self {
         Self {
-            inner: Rc::new(RustgiRef {
-                app,
-                address,
-                max_body_size: 1024 * 1024,
-            }),
+            app,
+            address,
+            max_body_size: 1024 * 1024,
         }
     }
 
     pub fn set_max_body_size(&mut self, max_body_size: usize) {
-        unsafe { &mut *(Rc::as_ptr(&self.inner) as *mut RustgiRef) }.max_body_size = max_body_size;
+        self.max_body_size = max_body_size;
     }
 
     pub fn get_wsgi_app(&self) -> PyObject {
-        self.inner.app.clone()
+        self.app.clone()
     }
 
     pub fn get_host(&self) -> String {
-        self.inner.address.ip().to_string()
+        self.address.ip().to_string()
     }
 
     pub fn get_port(&self) -> u16 {
-        self.inner.address.port()
+        self.address.port()
     }
 
     pub fn get_max_body_size(&self) -> usize {
-        self.inner.max_body_size
+        self.max_body_size
     }
 
     pub fn serve(&self) -> Result<(), Error> {
@@ -60,10 +53,10 @@ impl Rustgi {
         let local = tokio::task::LocalSet::new();
 
         info!("You can connect to the server using `nc`:");
-        info!("$ nc {}", self.inner.address.to_string());
+        info!("$ nc {}", self.address.to_string());
 
         local.block_on(&rt, async {
-            let listener = TcpListener::bind(self.inner.address).await?;
+            let listener = TcpListener::bind(self.address).await?;
 
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {

@@ -13,6 +13,7 @@ pub enum Error {
     HyperError(hyper::Error),
     HyperToStrError(hyper::header::ToStrError),
     BoxError(Box<dyn std::error::Error + Send + Sync>),
+    JoinError(tokio::task::JoinError),
 }
 
 impl From<PyErr> for Error {
@@ -69,6 +70,12 @@ impl From<Box<dyn std::error::Error + Send + Sync>> for Error {
     }
 }
 
+impl From<tokio::task::JoinError> for Error {
+    fn from(err: tokio::task::JoinError) -> Self {
+        Self::JoinError(err)
+    }
+}
+
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -81,6 +88,7 @@ impl std::fmt::Display for Error {
             Self::HyperError(err) => write!(f, "HyperError: {}", err),
             Self::HyperToStrError(err) => write!(f, "HyperToStrError: {}", err),
             Self::BoxError(err) => write!(f, "BoxError: {}", err),
+            Self::JoinError(err) => write!(f, "JoinError: {}", err),
         }
     }
 }
@@ -97,6 +105,7 @@ impl std::error::Error for Error {
             Self::HyperError(err) => Some(err),
             Self::HyperToStrError(err) => Some(err),
             Self::BoxError(err) => Some(err.as_ref()),
+            Self::JoinError(err) => Some(err),
         }
     }
 }
@@ -125,7 +134,10 @@ impl From<Error> for PyErr {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{}", err))
             }
             Error::BoxError(err) => {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{}", err.as_ref()))
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", err.as_ref()))
+            }
+            Error::JoinError(err) => {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", err))
             }
         }
     }
