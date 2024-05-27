@@ -1,7 +1,6 @@
 import json
 import logging
 import rustgi
-import urllib.parse
 
 
 FORMAT = "%(levelname)s %(name)s %(asctime)-15s %(filename)s:%(lineno)d %(message)s"

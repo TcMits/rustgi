@@ -1,14 +1,34 @@
-use crate::error::Error;
-use crate::service::get_service;
+use crate::response::{empty_response, WSGIStartResponse};
+use crate::utils::with_gil;
+use anyhow::{anyhow, Result};
+use encoding::all::ISO_8859_1;
+use encoding::{DecoderTrap, Encoding};
+use futures::StreamExt;
+use http::{header, StatusCode};
+use http_body_util::{BodyStream, LengthLimitError, Limited};
 use hyper::body::Incoming;
-use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper::{body::Body, Request, Version};
+use hyper_util::rt::TokioExecutor;
+use hyper_util::server::conn::auto;
+use lazy_static::lazy_static;
 use log::{debug, info};
 use pyo3::ffi::{PyDict_SetItemString, PySys_GetObject};
+use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use pyo3::{intern, prelude::*, AsPyPointer};
+use pyo3::types::PyModule;
+use pyo3::{intern, Py, Python};
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
-use tower_http::body::Limited;
+use urlencoding::decode_binary;
+
+lazy_static! {
+    static ref PY_BYTES_IO: PyObject = Python::with_gil(|py| PyModule::import_bound(py, "io")
+        .unwrap()
+        .getattr("BytesIO")
+        .unwrap()
+        .into());
+}
 
 #[derive(Clone)]
 pub struct Rustgi {
@@ -46,14 +66,151 @@ impl Rustgi {
         self.max_body_size
     }
 
-    pub fn serve(&self) -> Result<(), Error> {
+    pub fn serve(&self) -> Result<()> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_io()
+            .enable_time()
             .build()?;
         let local = tokio::task::LocalSet::new();
 
         info!("You can connect to the server using `nc`:");
         info!("$ nc {}", self.address.to_string());
+
+        let service_factory = |rustgi: Rustgi, remote_addr: std::net::SocketAddr| {
+            move |req: Request<Incoming>| {
+                let rustgi = rustgi.clone();
+                async move {
+                    let (parts, body) = {
+                        let mut buf =
+                            bytes::BytesMut::with_capacity(req.size_hint().lower() as usize);
+                        let (parts, body) = req.into_parts();
+                        let content_length = parts
+                            .headers
+                            .get(header::CONTENT_LENGTH)
+                            .and_then(|value| value.to_str().ok()?.parse::<usize>().ok());
+                        let body_limit = match content_length {
+                            Some(len) if len > rustgi.get_max_body_size() => {
+                                return Ok(empty_response(StatusCode::PAYLOAD_TOO_LARGE));
+                            }
+                            Some(len) => rustgi.get_max_body_size().min(len),
+                            None => rustgi.get_max_body_size(),
+                        };
+                        let mut body = BodyStream::new(Limited::new(body, body_limit));
+
+                        while let Some(frame) = body.next().await {
+                            let frame = match frame {
+                                Ok(frame) => frame,
+                                Err(err) => {
+                                    let err: Box<dyn std::error::Error + Send + Sync> = err.into();
+                                    if err.is::<LengthLimitError>() {
+                                        return Ok(empty_response(StatusCode::PAYLOAD_TOO_LARGE));
+                                    }
+
+                                    return Err(anyhow!(err));
+                                }
+                            };
+
+                            if frame.is_trailers() {
+                                continue;
+                            }
+
+                            let frame = frame.into_data().unwrap();
+                            buf.extend_from_slice(frame.as_ref());
+                        }
+
+                        (parts, buf.freeze())
+                    };
+
+                    with_gil(move |py| -> Result<_> {
+                        let environ = rustgi.get_default_environ(py)?;
+                        environ.set_item(
+                            intern!(environ.py(), "wsgi.input"),
+                            PY_BYTES_IO.call0(py)?,
+                        )?;
+                        environ
+                            .set_item(intern!(py, "REMOTE_ADDR"), remote_addr.ip().to_string())?;
+                        environ.set_item(intern!(py, "REMOTE_PORT"), remote_addr.port())?;
+                        environ.set_item(
+                            intern!(py, "SERVER_PROTOCOL"),
+                            match parts.version {
+                                Version::HTTP_09 => intern!(py, "HTTP/0.9"),
+                                Version::HTTP_10 => intern!(py, "HTTP/1.0"),
+                                Version::HTTP_11 => intern!(py, "HTTP/1.1"),
+                                Version::HTTP_2 => intern!(py, "HTTP/2.0"),
+                                Version::HTTP_3 => intern!(py, "HTTP/3.0"),
+                                _ => {
+                                    return Ok(empty_response(
+                                        StatusCode::HTTP_VERSION_NOT_SUPPORTED,
+                                    ));
+                                }
+                            },
+                        )?;
+                        environ.set_item(intern!(py, "REQUEST_METHOD"), parts.method.as_str())?;
+
+                        let uri = parts.uri;
+                        environ.set_item(
+                            intern!(py, "PATH_INFO"),
+                            ISO_8859_1
+                                .decode(
+                                    decode_binary(uri.path().as_bytes()).as_ref(),
+                                    DecoderTrap::Replace,
+                                )
+                                .unwrap_or("".into()),
+                        )?; // i don't understand???? https://peps.python.org/pep-3333/#url-reconstruction
+                        environ.set_item(intern!(py, "QUERY_STRING"), uri.query().unwrap_or(""))?;
+                        environ.set_item(
+                            intern!(py, "wsgi.url_scheme"),
+                            uri.scheme_str().unwrap_or("http"),
+                        )?;
+
+                        for (key, value) in parts.headers.iter() {
+                            match *key {
+                                header::CONTENT_LENGTH => {
+                                    environ
+                                        .set_item(intern!(py, "CONTENT_LENGTH"), value.to_str()?)?;
+                                    continue;
+                                }
+                                header::CONTENT_TYPE => {
+                                    environ
+                                        .set_item(intern!(py, "CONTENT_TYPE"), value.to_str()?)?;
+                                    continue;
+                                }
+                                _ => {}
+                            }
+
+                            let key = "HTTP_".to_owned()
+                                + &key
+                                    .as_str()
+                                    .chars()
+                                    .map(|c| {
+                                        if c == '-' {
+                                            '_'
+                                        } else {
+                                            c.to_ascii_uppercase()
+                                        }
+                                    })
+                                    .collect::<String>();
+
+                            environ.set_item(key, value.to_str()?)?;
+                        }
+
+                        let input = environ
+                            .get_item(intern!(py, "wsgi.input"))
+                            .unwrap()
+                            .unwrap();
+                        input.call_method1(intern!(py, "write"), (body.as_ref(),))?;
+                        input.call_method1(intern!(py, "seek"), (0,))?;
+                        let wsgi_response_config: Py<WSGIStartResponse> =
+                            Py::new(py, WSGIStartResponse::new())?;
+                        let wsgi_iter = rustgi
+                            .get_wsgi_app()
+                            .call1(py, (environ, &wsgi_response_config))?;
+                        WSGIStartResponse::take_response(wsgi_response_config.bind(py), wsgi_iter)
+                    })
+                    .await
+                }
+            }
+        };
 
         local.block_on(&rt, async {
             let listener = TcpListener::bind(self.address).await?;
@@ -67,25 +224,23 @@ impl Rustgi {
                         let (stream, remote_addr) = match listener.accept().await {
                             Ok(result) => result,
                             Err(e) => {
-                                debug!("Error accepting connection: {}", e);
+                                debug!("Error accepting connection: {:?}", e);
                                 continue;
                             }
                         };
+
+                        if let Err(err) = stream.set_nodelay(true) {
+                            debug!("Error setting TCP_NODELAY: {:?}", err);
+                            continue;
+                        }
+
                         let rustgi = self.clone();
-
                         tokio::task::spawn_local(async move {
-                            let service = tower::ServiceBuilder::new()
-                                .layer(tower_http::limit::RequestBodyLimitLayer::new(
-                                    rustgi.get_max_body_size(),
-                                ))
-                                .service(get_service::<Limited<Incoming>>(rustgi, remote_addr));
-
-
-                            if let Err(err) = http1::Builder::new().serve_connection(
+                            if let Err(err) = auto::Builder::new(TokioExecutor::new()).serve_connection(
                                 hyper_util::rt::TokioIo::new(stream),
-                                hyper_util::service::TowerToHyperService::new(service)
+                                service_fn(service_factory(rustgi, remote_addr)),
                             ).await {
-                                debug!("Error serving connection: {}", err);
+                                debug!("Error serving connection: {:?}", err);
                             }
                         });
                     }
@@ -96,8 +251,8 @@ impl Rustgi {
         })
     }
 
-    pub(crate) fn get_default_environ<'p>(&self, py: Python<'p>) -> Result<&'p PyDict, Error> {
-        let environ = PyDict::new(py);
+    pub(crate) fn get_default_environ<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyDict>> {
+        let environ = PyDict::new_bound(py);
         environ.set_item(intern!(py, "SCRIPT_NAME"), intern!(py, ""))?;
         environ.set_item(intern!(environ.py(), "SERVER_NAME"), self.get_host())?;
         environ.set_item(intern!(environ.py(), "SERVER_PORT"), self.get_port())?;

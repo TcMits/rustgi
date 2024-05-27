@@ -1,3 +1,4 @@
+use anyhow::Result;
 use pyo3::prelude::*;
 
 #[pyclass]
@@ -47,8 +48,8 @@ impl Default for RustgiConfig {
 }
 
 #[pyfunction]
-fn serve(py: Python<'_>, app: PyObject, config: &RustgiConfig) -> PyResult<()> {
-    py.allow_threads(|| -> Result<(), crate::error::Error> {
+fn serve(py: Python<'_>, app: PyObject, config: &RustgiConfig) -> Result<()> {
+    py.allow_threads(|| -> Result<(), anyhow::Error> {
         let rustgi = config.clone().into_rustgi(app)?;
         rustgi.serve()
     })?;
@@ -57,7 +58,7 @@ fn serve(py: Python<'_>, app: PyObject, config: &RustgiConfig) -> PyResult<()> {
 }
 
 #[pymodule]
-fn rustgi(_py: Python, m: &PyModule) -> PyResult<()> {
+fn rustgi(m: &Bound<'_, PyModule>) -> PyResult<()> {
     pyo3_log::init();
     m.add_class::<RustgiConfig>()?;
     m.add_function(wrap_pyfunction!(serve, m)?)?;

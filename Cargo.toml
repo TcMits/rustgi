@@ -1,6 +1,6 @@
 [package]
 name = "rustgi"
-version = "0.1.19"
+version = "0.1.20"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -11,19 +11,20 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 http = "1.0.0"
 lazy_static = "1.4.0"
-pyo3 = "0.20.2"
-pyo3-log = { version = "0.9.0"}
+pyo3 = { version = "0.21.2", features = ["anyhow"] }
+pyo3-log = { version = "0.10.0"}
 log = { version = "0.4.17" }
 tokio = { version = "1.32.0", features = ["net", "signal", "rt", "macros", "io-util"] }
-hyper = { version = "1.1.0", features = ["server", "http1"] }
+hyper = { version = "1.3.1", features = ["server", "http1", "http2"] }
 http-body-util = "0.1.0"
-hyper-util = { features = ["tokio", "http1", "server", "service"], version = "0.1.3" }
-tower = "0.4.13"
-tower-http = { version = "0.5.0", features = ["limit"] }
+hyper-util = { features = ["tokio", "http2", "http1", "server", "service"], version = "0.1.4" }
 futures = "0.3.29"
 urlencoding = "2.1.3"
 encoding = "0.2.33"
 bytes = "1.5.0"
+rayon = "1.10.0"
+tokio-rayon = "2.1.0"
+anyhow = "1.0.86"
 
 [dev-dependencies]
 rustgi = { path = ".", features = ["python"] }
