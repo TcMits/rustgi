@@ -16,13 +16,13 @@ use pyo3::{
     types::{PyBytes, PyIterator},
     Py, PyResult, Python,
 };
-use std::task::ready;
+use std::{sync::Arc, task::ready};
 
 pub(crate) struct PyBytesBuf(Py<PyBytes>, usize);
 
 impl PyBytesBuf {
     #[inline]
-    pub(crate) fn new(b: Py<PyBytes>) -> Self {
+    fn new(b: Py<PyBytes>) -> Self {
         Self(b, 0)
     }
 }
@@ -49,25 +49,52 @@ impl Buf for PyBytesBuf {
     }
 }
 
-pub(crate) fn py_stream(iter: Py<PyIterator>) -> BoxStream<'static, PyResult<Frame<PyBytesBuf>>> {
-    unfold(iter, |state| async {
+pub(crate) fn py_stream(
+    pool: Arc<rayon::ThreadPool>,
+    iter: Py<PyIterator>,
+) -> BoxStream<'static, PyResult<Frame<PyBytesBuf>>> {
+    struct S {
+        pool: Arc<rayon::ThreadPool>,
+        iter: Py<PyIterator>,
+    }
+
+    let s = S { pool, iter };
+
+    unfold(s, |state| async {
         with_gil(
-            |py| -> Option<(PyResult<Frame<PyBytesBuf>>, Py<PyIterator>)> {
-                let mut iter = state.into_bound(py);
+            state.pool.clone(),
+            |py| -> Option<(PyResult<Frame<PyBytesBuf>>, S)> {
+                let S { pool, iter } = state;
+                let mut iter = iter.into_bound(py);
                 match iter.next() {
                     Some(chunk) => match chunk {
                         Ok(chunk) => {
                             let chunk = chunk.extract();
                             if let Err(err) = chunk {
-                                return Some((Err(err), iter.into()));
+                                return Some((
+                                    Err(err),
+                                    S {
+                                        pool,
+                                        iter: iter.into(),
+                                    },
+                                ));
                             }
 
                             Some((
                                 Ok(Frame::data(PyBytesBuf::new(chunk.unwrap()))),
-                                iter.into(),
+                                S {
+                                    pool,
+                                    iter: iter.into(),
+                                },
                             ))
                         }
-                        Err(err) => Some((Err(err), iter.into())),
+                        Err(err) => Some((
+                            Err(err),
+                            S {
+                                pool,
+                                iter: iter.into(),
+                            },
+                        )),
                     },
                     None => None,
                 }
@@ -85,7 +112,7 @@ pub(crate) struct WSGIResponseBody {
 }
 
 impl WSGIResponseBody {
-    fn new(iter: Option<Bound<'_, PyIterator>>) -> PyResult<Self> {
+    fn new(iter: Option<(Arc<rayon::ThreadPool>, Bound<'_, PyIterator>)>) -> PyResult<Self> {
         let mut result = Self {
             first_chunk: None,
             second_chunk: None,
@@ -96,7 +123,7 @@ impl WSGIResponseBody {
             return Ok(result);
         }
 
-        let mut iter = iter.unwrap();
+        let (pool, mut iter) = iter.unwrap();
 
         match iter.next() {
             Some(chunk) => result.first_chunk = Some(PyBytesBuf::new(chunk?.extract()?)),
@@ -108,7 +135,7 @@ impl WSGIResponseBody {
             None => return Ok(result),
         }
 
-        result.stream = Some(py_stream(iter.into()));
+        result.stream = Some(py_stream(pool, iter.into()));
         Ok(result)
     }
 }
@@ -210,11 +237,12 @@ impl WSGIStartResponse {
 impl WSGIStartResponse {
     pub(crate) fn take_response(
         slf: &Bound<'_, Self>,
+        pool: Arc<rayon::ThreadPool>,
         wsgi_iter: PyObject,
     ) -> Result<Response<WSGIResponseBody>> {
-        let body = WSGIResponseBody::new(Some(wsgi_iter.bind(slf.py()).iter()?))?; // have to call this
-                                                                                   // first to trigger
-                                                                                   // start_response
+        let body = WSGIResponseBody::new(Some((pool, wsgi_iter.bind(slf.py()).iter()?)))?; // have to call this
+                                                                                           // first to trigger
+                                                                                           // start_response
         Ok(slf.borrow_mut().builder.take().unwrap().body(body)?)
     }
 }

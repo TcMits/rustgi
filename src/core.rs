@@ -1,5 +1,5 @@
 use crate::response::{empty_response, WSGIStartResponse};
-use crate::utils::with_gil;
+use crate::utils::{new_gil_pool, with_gil};
 use anyhow::{anyhow, Result};
 use encoding::all::ISO_8859_1;
 use encoding::{DecoderTrap, Encoding};
@@ -72,13 +72,15 @@ impl Rustgi {
             .enable_time()
             .build()?;
         let local = tokio::task::LocalSet::new();
+        let gil_thread_pool = new_gil_pool()?;
 
-        info!("You can connect to the server using `nc`:");
-        info!("$ nc {}", self.address.to_string());
+        let service_factory = |remote_addr: std::net::SocketAddr| {
+            let rustgi = self.clone();
+            let gil_thread_pool = gil_thread_pool.clone();
 
-        let service_factory = |rustgi: Rustgi, remote_addr: std::net::SocketAddr| {
             move |req: Request<Incoming>| {
                 let rustgi = rustgi.clone();
+                let gil_thread_pool = gil_thread_pool.clone();
                 async move {
                     let (parts, body) = {
                         let mut buf =
@@ -121,7 +123,7 @@ impl Rustgi {
                         (parts, buf.freeze())
                     };
 
-                    with_gil(move |py| -> Result<_> {
+                    with_gil(gil_thread_pool.clone(), move |py| -> Result<_> {
                         let environ = rustgi.get_default_environ(py)?;
                         environ.set_item(
                             intern!(environ.py(), "wsgi.input"),
@@ -205,7 +207,11 @@ impl Rustgi {
                         let wsgi_iter = rustgi
                             .get_wsgi_app()
                             .call1(py, (environ, &wsgi_response_config))?;
-                        WSGIStartResponse::take_response(wsgi_response_config.bind(py), wsgi_iter)
+                        WSGIStartResponse::take_response(
+                            wsgi_response_config.bind(py),
+                            gil_thread_pool,
+                            wsgi_iter,
+                        )
                     })
                     .await
                 }
@@ -213,34 +219,40 @@ impl Rustgi {
         };
 
         local.block_on(&rt, async {
-            let listener = TcpListener::bind(self.address).await?;
+            let address = self.address;
+            let listener = TcpListener::bind(address).await?;
+            with_gil(gil_thread_pool.clone(), move |_| {
+                info!("You can connect to the server using `nc`:");
+                info!("$ nc {}", address.to_string());
+            }).await;
 
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
-                    info!("Ctrl-C received, shutting down");
+                    with_gil(gil_thread_pool.clone(), |_| { info!("Ctrl-C received, shutting down"); }).await;
                 }
                 _ = async {
                     loop {
+                        let gil_thread_pool = gil_thread_pool.clone();
                         let (stream, remote_addr) = match listener.accept().await {
                             Ok(result) => result,
                             Err(e) => {
-                                debug!("Error accepting connection: {:?}", e);
+                                with_gil(gil_thread_pool, move |_| { debug!("Error accepting connection: {:?}", e); }).await;
                                 continue;
                             }
                         };
 
                         if let Err(err) = stream.set_nodelay(true) {
-                            debug!("Error setting TCP_NODELAY: {:?}", err);
+                            with_gil(gil_thread_pool, move |_| { debug!("Error setting TCP_NODELAY: {:?}", err); }).await;
                             continue;
                         }
 
-                        let rustgi = self.clone();
+                        let service = service_fn(service_factory(remote_addr));
                         tokio::task::spawn_local(async move {
                             if let Err(err) = auto::Builder::new(TokioExecutor::new()).serve_connection(
                                 hyper_util::rt::TokioIo::new(stream),
-                                service_fn(service_factory(rustgi, remote_addr)),
+                                service,
                             ).await {
-                                debug!("Error serving connection: {:?}", err);
+                                with_gil(gil_thread_pool, move |_| { debug!("Error serving connection: {:?}", err); }).await;
                             }
                         });
                     }

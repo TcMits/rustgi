@@ -10,6 +10,7 @@ HOST_WITH_SCHEME = "http://" + HOST
 
 LARGE_BODY = "xxxxxx\n" * 1024
 
+
 #
 def test_wsgi():
     r = requests.post(HOST_WITH_SCHEME + "/info?test=true", data="world")
@@ -96,3 +97,10 @@ def test_unicode():
     r = requests.get(HOST_WITH_SCHEME + "/mã", data="hello")
     assert r.status_code == 200
     assert r.text == "hello"
+
+
+def test_increment():
+    for i in range(10):
+        r = requests.get(HOST_WITH_SCHEME + "/increment")
+        assert r.status_code == 200
+        assert r.text == str(i)

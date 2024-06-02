@@ -1,12 +1,13 @@
 import json
 import logging
 import rustgi
-
+import threading
 
 FORMAT = "%(levelname)s %(name)s %(asctime)-15s %(filename)s:%(lineno)d %(message)s"
 logging.basicConfig(format=FORMAT)
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
+_local_state = threading.local()
 
 
 def info(environ, protocol):
@@ -54,6 +55,20 @@ def empty_app(environ, protocol):
     return b""
 
 
+def increment(environ, protocol):
+    value = _local_state.__dict__.get("value", 0)
+    _local_state.__dict__["value"] = value + 1
+
+    protocol(
+        "200 OK",
+        [
+            ("content-type", "text/plain; charset=utf-8"),
+            ("content-length", str(len(str(value)))),
+        ],
+    )
+    return [str(value).encode("utf8")]
+
+
 def app(environ, protocol):
     return {
         "/info": info,
@@ -63,6 +78,7 @@ def app(environ, protocol):
         "/empty_app": empty_app,
         "/mã": echo,
         "/": echo,
+        "/increment": increment,
         "": echo,
     }[environ["PATH_INFO"].encode("iso-8859-1").decode()](environ, protocol)
 
