@@ -240,9 +240,9 @@ impl WSGIStartResponse {
         pool: Arc<rayon::ThreadPool>,
         wsgi_iter: PyObject,
     ) -> Result<Response<WSGIResponseBody>> {
-        let body = WSGIResponseBody::new(Some((pool, wsgi_iter.bind(slf.py()).iter()?)))?; // have to call this
-                                                                                           // first to trigger
-                                                                                           // start_response
+        let body = WSGIResponseBody::new(Some((pool, wsgi_iter.bind(slf.py()).try_iter()?)))?; // have to call this
+                                                                                               // first to trigger
+                                                                                               // start_response
         Ok(slf.borrow_mut().builder.take().unwrap().body(body)?)
     }
 }

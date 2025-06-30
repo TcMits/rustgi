@@ -1,7 +1,6 @@
 import requests
 import pytest
 import socket
-import errno
 
 HOST_WITHOUT_PORT = "localhost"
 PORT = 8000

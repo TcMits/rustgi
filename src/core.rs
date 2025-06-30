@@ -12,24 +12,21 @@ use hyper::service::service_fn;
 use hyper::{body::Body, Request, Response, Version};
 use hyper_util::rt::TokioExecutor;
 use hyper_util::server::conn::auto;
-use lazy_static::lazy_static;
 use log::{debug, info};
 use pyo3::ffi::{PyDict_SetItemString, PySys_GetObject};
 use pyo3::prelude::*;
+use pyo3::sync::GILOnceCell;
 use pyo3::types::PyDict;
-use pyo3::types::PyModule;
 use pyo3::{intern, Py, Python};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use urlencoding::decode_binary;
 
-lazy_static! {
-    static ref PY_BYTES_IO: PyObject = Python::with_gil(|py| PyModule::import_bound(py, "io")
-        .unwrap()
-        .getattr("BytesIO")
-        .unwrap()
-        .into());
+static PY_BYTES_IO: GILOnceCell<PyObject> = GILOnceCell::new();
+
+fn get_py_bytes_io(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    PY_BYTES_IO.import(py, "io", "BytesIO")
 }
 
 #[derive(Clone)]
@@ -107,7 +104,10 @@ impl Rustgi {
     ) -> Result<Response<WSGIResponseBody>> {
         with_gil(pool.clone(), move |py| -> Result<_> {
             let environ = self.get_default_environ(py)?;
-            environ.set_item(intern!(environ.py(), "wsgi.input"), PY_BYTES_IO.call0(py)?)?;
+            environ.set_item(
+                intern!(environ.py(), "wsgi.input"),
+                get_py_bytes_io(py)?.call0()?,
+            )?;
             environ.set_item(intern!(py, "REMOTE_ADDR"), remote_addr.ip().to_string())?;
             environ.set_item(intern!(py, "REMOTE_PORT"), remote_addr.port())?;
             environ.set_item(
@@ -271,7 +271,7 @@ impl Rustgi {
     }
 
     pub(crate) fn get_default_environ<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyDict>> {
-        let environ = PyDict::new_bound(py);
+        let environ = PyDict::new(py);
         environ.set_item(intern!(py, "SCRIPT_NAME"), intern!(py, ""))?;
         environ.set_item(intern!(environ.py(), "SERVER_NAME"), self.get_host())?;
         environ.set_item(intern!(environ.py(), "SERVER_PORT"), self.get_port())?;
