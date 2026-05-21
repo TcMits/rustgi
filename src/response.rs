@@ -11,7 +11,6 @@ use hyper::Response;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
-use pyo3::PyObject;
 use pyo3::{
     types::{PyBytes, PyIterator},
     Py, PyResult, Python,
@@ -45,7 +44,7 @@ impl Buf for PyBytesBuf {
     #[inline]
     fn chunk(&self) -> &[u8] {
         // safe because Python bytes are immutable, the result may be used for as long as the reference to
-        unsafe { &self.0.as_bytes(Python::assume_gil_acquired())[self.1..] }
+        unsafe { &self.0.as_bytes(Python::assume_attached())[self.1..] }
     }
 }
 
@@ -69,7 +68,7 @@ pub(crate) fn py_stream(
                 match iter.next() {
                     Some(chunk) => match chunk {
                         Ok(chunk) => {
-                            let chunk = chunk.extract();
+                            let chunk = chunk.extract().map_err(|err| PyErr::from(err));
                             if let Err(err) = chunk {
                                 return Some((
                                     Err(err),
@@ -238,7 +237,7 @@ impl WSGIStartResponse {
     pub(crate) fn take_response(
         slf: &Bound<'_, Self>,
         pool: Arc<rayon::ThreadPool>,
-        wsgi_iter: PyObject,
+        wsgi_iter: Py<PyAny>,
     ) -> Result<Response<WSGIResponseBody>> {
         let body = WSGIResponseBody::new(Some((pool, wsgi_iter.bind(slf.py()).try_iter()?)))?; // have to call this
                                                                                                // first to trigger

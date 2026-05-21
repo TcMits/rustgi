@@ -1,9 +1,10 @@
 [build-system]
-requires = ["maturin>=1.0,<2.0"]
+requires = ["maturin>=1.9.4,<2"]
 build-backend = "maturin"
 
 [project]
 name = "rustgi"
+dynamic = ["version"]
 requires-python = ">=3.7"
 authors = [
     {name = "Lâm Hoàng Phúc", email = "eddiebrock2001@gmail.com"}

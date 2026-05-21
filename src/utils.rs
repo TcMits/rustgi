@@ -15,7 +15,7 @@ pub(crate) fn new_gil_pool() -> Result<Arc<rayon::ThreadPool>, rayon::ThreadPool
                 if let Some(stack_size) = thread.stack_size() {
                     b = b.stack_size(stack_size);
                 }
-                b.spawn(|| Python::with_gil(|_| thread.run()))?;
+                b.spawn(|| Python::attach(|_| thread.run()))?;
                 Ok(())
             })
             .num_threads(1)
@@ -29,6 +29,6 @@ where
     R: std::marker::Send + 'static,
     F: for<'py> FnOnce(Python<'py>) -> R + std::marker::Send + 'static,
 {
-    pool.spawn_fifo_async(move || f(unsafe { Python::assume_gil_acquired() }))
+    pool.spawn_fifo_async(move || f(unsafe { Python::assume_attached() }))
         .await // spawn fifo to avoid unexpected behaviors
 }

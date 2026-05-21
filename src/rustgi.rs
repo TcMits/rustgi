@@ -1,7 +1,7 @@
 use anyhow::Result;
 use pyo3::prelude::*;
 
-#[pyclass]
+#[pyclass(skip_from_py_object)]
 #[derive(Clone)]
 struct RustgiConfig {
     address: String,
@@ -9,7 +9,7 @@ struct RustgiConfig {
 }
 
 impl RustgiConfig {
-    fn into_rustgi(self, app: PyObject) -> PyResult<crate::core::Rustgi> {
+    fn into_rustgi(self, app: Py<PyAny>) -> PyResult<crate::core::Rustgi> {
         let mut rustgi = crate::core::Rustgi::new(self.address.parse()?, app);
         rustgi.set_max_body_size(self.max_body_size);
 
@@ -48,8 +48,8 @@ impl Default for RustgiConfig {
 }
 
 #[pyfunction]
-fn serve(py: Python<'_>, app: PyObject, config: &RustgiConfig) -> Result<()> {
-    py.allow_threads(|| -> Result<(), anyhow::Error> {
+fn serve(py: Python<'_>, app: Py<PyAny>, config: &RustgiConfig) -> Result<()> {
+    py.detach(|| -> Result<(), anyhow::Error> {
         let rustgi = config.clone().into_rustgi(app)?;
         rustgi.serve()
     })?;

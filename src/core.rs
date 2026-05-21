@@ -15,7 +15,7 @@ use hyper_util::server::conn::auto;
 use log::{debug, info};
 use pyo3::ffi::{PyDict_SetItemString, PySys_GetObject};
 use pyo3::prelude::*;
-use pyo3::sync::GILOnceCell;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::PyDict;
 use pyo3::{intern, Py, Python};
 use std::net::SocketAddr;
@@ -23,7 +23,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use urlencoding::decode_binary;
 
-static PY_BYTES_IO: GILOnceCell<PyObject> = GILOnceCell::new();
+static PY_BYTES_IO: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 fn get_py_bytes_io(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
     PY_BYTES_IO.import(py, "io", "BytesIO")
@@ -31,13 +31,13 @@ fn get_py_bytes_io(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
 
 #[derive(Clone)]
 pub struct Rustgi {
-    app: Arc<PyObject>,
+    app: Arc<Py<PyAny>>,
     address: SocketAddr,
     max_body_size: usize,
 }
 
 impl Rustgi {
-    pub fn new(address: SocketAddr, app: PyObject) -> Self {
+    pub fn new(address: SocketAddr, app: Py<PyAny>) -> Self {
         Self {
             app: Arc::new(app),
             address,
@@ -49,7 +49,7 @@ impl Rustgi {
         self.max_body_size = max_body_size;
     }
 
-    pub fn get_wsgi_app(&self) -> Arc<PyObject> {
+    pub fn get_wsgi_app(&self) -> Arc<Py<PyAny>> {
         self.app.clone()
     }
 

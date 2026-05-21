@@ -25,7 +25,7 @@ from app import application
 
 rustgi.serve(
     application,
-    rustgi.RustgiConfig().set_address("0.0.0.0:8000"),
+    rustgi.RustgiConfig().set_address("0.0.0.0:8000").set_max_body_size(1024),
 )
 ```
 
@@ -33,19 +33,18 @@ rustgi.serve(
 
 rustgi
 ```sh
-└❯ wrk -t4 -c1000 -d30s --latency http://0.0.0.0:8000
+└❯ wrk -t4 -c50 -d30s --latency http://0.0.0.0:8000
 Running 30s test @ http://0.0.0.0:8000
-  4 threads and 1000 connections
+  4 threads and 50 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     5.03ms  353.39us  10.73ms   87.20%
-    Req/Sec    12.42k     1.90k   19.36k    53.62%
+    Latency   304.21us   73.87us   2.62ms   67.57%
+    Req/Sec    38.51k     1.43k   42.18k    74.58%
   Latency Distribution
-     50%    4.97ms
-     75%    5.14ms
-     90%    5.35ms
-     99%    6.53ms
-  1487223 requests in 30.10s, 127.65MB read
-  Socket errors: connect 751, read 81, write 0, timeout 0
-Requests/sec:  49403.93
-Transfer/sec:      4.24MB
+     50%  292.00us
+     75%  335.00us
+     90%  426.00us
+     99%  462.00us
+  4614102 requests in 30.10s, 453.24MB read
+Requests/sec: 153292.39
+Transfer/sec:     15.06MB
 ```
